@@ -1,0 +1,52 @@
+name: ci (python)
+
+on:
+  push:
+    branches: [main]
+    paths: ["python/**", ".github/workflows/ci-python.yml"]
+  pull_request:
+    paths: ["python/**", ".github/workflows/ci-python.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: python
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Import check (catches FastMCP API mismatches)
+        run: python -c "import crosstalk_mcp; print('import OK')"
+
+      - name: Smoke test (boot server + REST round-trip)
+        run: |
+          export PORT=8765   # no RELAY_TOKEN -> open, fine for CI
+          python crosstalk_mcp.py &
+          PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://localhost:8765/api/channels; then break; fi
+            sleep 1
+          done
+          curl -sf -X POST http://localhost:8765/api/channels/ci/messages \
+            -H "Content-Type: application/json" \
+            -d '{"sender":"ci","type":"NOTE","body":"hello"}'
+          curl -sf "http://localhost:8765/api/channels/ci/messages?since_id=0" | grep -q '"body": "hello"' \
+            || { echo "message round-trip failed"; kill $PID; exit 1; }
+          kill $PID

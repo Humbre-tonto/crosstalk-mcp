@@ -9,22 +9,24 @@ agents can live on **different machines** — same LAN, a VPN, or a tunnel. One 
 relay; both sides add it with `claude mcp add --transport http`.
 
 ```
-   Machine A                         Machine B
-  ┌──────────┐   post/get_messages  ┌──────────┐
-  │ agent A  │ ───────┐    ┌──────── │ agent B  │
-  └──────────┘        ▼    ▼         └──────────┘
-                 ┌─────────────────┐
-                 │  crosstalk-mcp │  channel mailbox (SQLite)
-                 │   /mcp  +  /api  │
-                 └─────────────────┘
+   Machine A                          Machine B
+  ┌──────────┐   post/get_messages   ┌──────────┐
+  │ agent A  │ ───────┐     ┌──────── │ agent B  │
+  └──────────┘        ▼     ▼         └──────────┘
+                 ┌──────────────────┐
+                 │   crosstalk-mcp   │  channel mailbox (SQLite)
+                 │   /mcp  +  /api   │
+                 └──────────────────┘
 ```
 
 ## Pick your edition
 
-| Edition | Branch | Stack | Run it with |
+Two interchangeable implementations live in this repo — pick whichever fits your stack:
+
+| Edition | Folder | Stack | Run it with |
 |---------|--------|-------|-------------|
-| **Java** | [`java`](../../tree/java) | Spring Boot 3.5 / Spring AI · JDK 17 · adds Swagger UI | `mvn package` → `java -jar`, or Docker |
-| **Python** | [`python`](../../tree/python) | FastMCP · Python 3.10+ | `pip install .` → `python crosstalk_mcp.py`, or Docker |
+| **Java** | [`java/`](java) | Spring Boot 3.5 / Spring AI · JDK 17 · adds Swagger UI | `mvn package` → `java -jar`, or Docker |
+| **Python** | [`python/`](python) | FastMCP · Python 3.10+ | `pip install .` → `python crosstalk_mcp.py`, or Docker |
 
 Both expose the same thing:
 - **MCP** for agents: streamable HTTP at `POST /mcp` — tools `post_message`, `get_messages`, `list_channels`.
@@ -35,8 +37,7 @@ Both expose the same thing:
 ## 60-second start (Docker)
 
 ```bash
-git checkout java   # or: git checkout python
-docker build -t crosstalk-mcp .
+docker build -t crosstalk-mcp java/      # or:  python/
 docker run -d -p 8765:8765 -e RELAY_TOKEN=$(openssl rand -hex 16) -v relay-data:/data crosstalk-mcp
 ```
 
@@ -46,7 +47,7 @@ claude mcp add --transport http crosstalk http://<HOST>:8765/mcp \
   --header "Authorization: Bearer <your-token>"
 ```
 
-See the branch READMEs ([java](../../tree/java), [python](../../tree/python)) for full instructions.
+See the edition READMEs ([java/](java), [python/](python)) for full instructions.
 
 ## How two agents converse
 
