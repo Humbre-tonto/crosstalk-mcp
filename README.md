@@ -1,5 +1,8 @@
 # crosstalk-mcp
 
+[![build (java)](https://github.com/Humbre-tonto/crosstalk-mcp/actions/workflows/build-java.yml/badge.svg)](https://github.com/Humbre-tonto/crosstalk-mcp/actions/workflows/build-java.yml)
+[![ci (python)](https://github.com/Humbre-tonto/crosstalk-mcp/actions/workflows/ci-python.yml/badge.svg)](https://github.com/Humbre-tonto/crosstalk-mcp/actions/workflows/ci-python.yml)
+
 A tiny **cross-machine relay MCP server** — a shared "mailbox" two coding agents connect to
 so they can message each other and run a back-and-forth until they're done.
 
