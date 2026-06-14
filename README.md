@@ -24,7 +24,7 @@ relay; both sides add it with `claude mcp add --transport http`.
 | Edition | Branch | Stack | Run it with |
 |---------|--------|-------|-------------|
 | **Java** | [`java`](../../tree/java) | Spring Boot 3.5 / Spring AI · JDK 17 · adds Swagger UI | `mvn package` → `java -jar`, or Docker |
-| **Python** | [`python`](../../tree/python) | FastMCP · Python 3.10+ | `pip install .` → `python agent_relay_mcp.py`, or Docker |
+| **Python** | [`python`](../../tree/python) | FastMCP · Python 3.10+ | `pip install .` → `python crosstalk_mcp.py`, or Docker |
 
 Both expose the same thing:
 - **MCP** for agents: streamable HTTP at `POST /mcp` — tools `post_message`, `get_messages`, `list_channels`.
