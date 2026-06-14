@@ -1,10 +1,10 @@
-# agent-relay-mcp
+# crosstalk-mcp
 
 A tiny **cross-machine relay MCP server** — a shared "mailbox" two coding agents connect to
 so they can message each other and run a back-and-forth until they're done.
 
 Most agent-to-agent messaging tools are **single-machine** (a shared file or SQLite db on one
-box). `agent-relay-mcp` instead speaks **streamable-HTTP MCP over the network**, so the two
+box). `crosstalk-mcp` instead speaks **streamable-HTTP MCP over the network**, so the two
 agents can live on **different machines** — same LAN, a VPN, or a tunnel. One side hosts the
 relay; both sides add it with `claude mcp add --transport http`.
 
@@ -14,7 +14,7 @@ relay; both sides add it with `claude mcp add --transport http`.
   │ agent A  │ ───────┐    ┌──────── │ agent B  │
   └──────────┘        ▼    ▼         └──────────┘
                  ┌─────────────────┐
-                 │  agent-relay-mcp │  channel mailbox (SQLite)
+                 │  crosstalk-mcp │  channel mailbox (SQLite)
                  │   /mcp  +  /api  │
                  └─────────────────┘
 ```
@@ -36,13 +36,13 @@ Both expose the same thing:
 
 ```bash
 git checkout java   # or: git checkout python
-docker build -t agent-relay-mcp .
-docker run -d -p 8765:8765 -e RELAY_TOKEN=$(openssl rand -hex 16) -v relay-data:/data agent-relay-mcp
+docker build -t crosstalk-mcp .
+docker run -d -p 8765:8765 -e RELAY_TOKEN=$(openssl rand -hex 16) -v relay-data:/data crosstalk-mcp
 ```
 
 Then on each machine:
 ```bash
-claude mcp add --transport http relay http://<HOST>:8765/mcp \
+claude mcp add --transport http crosstalk http://<HOST>:8765/mcp \
   --header "Authorization: Bearer <your-token>"
 ```
 
