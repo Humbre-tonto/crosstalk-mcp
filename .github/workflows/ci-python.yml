@@ -38,15 +38,20 @@ jobs:
       - name: Smoke test (boot server + REST round-trip)
         run: |
           export PORT=8765   # no RELAY_TOKEN -> open, fine for CI
-          python crosstalk_mcp.py &
+          python crosstalk_mcp.py > server.log 2>&1 &
           PID=$!
+          up=""
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://localhost:8765/api/channels; then break; fi
+            if curl -sf -o /dev/null http://localhost:8765/api/channels; then up=1; break; fi
             sleep 1
           done
-          curl -sf -X POST http://localhost:8765/api/channels/ci/messages \
-            -H "Content-Type: application/json" \
-            -d '{"sender":"ci","type":"NOTE","body":"hello"}'
-          curl -sf "http://localhost:8765/api/channels/ci/messages?since_id=0" | grep -q '"body": "hello"' \
-            || { echo "message round-trip failed"; kill $PID; exit 1; }
-          kill $PID
+          if [ -z "$up" ]; then echo "server did not start"; echo "----- server.log -----"; cat server.log; kill $PID 2>/dev/null; exit 1; fi
+          echo "POST ->"; curl -s -X POST http://localhost:8765/api/channels/ci/messages \
+            -H "Content-Type: application/json" -d '{"sender":"ci","type":"NOTE","body":"hello"}'; echo
+          body=$(curl -s "http://localhost:8765/api/channels/ci/messages?since_id=0")
+          echo "GET -> $body"
+          if ! printf '%s' "$body" | python -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(m.get('body')=='hello' for m in d) else 1)"; then
+            echo "round-trip assertion failed"; echo "----- server.log -----"; cat server.log; kill $PID 2>/dev/null; exit 1
+          fi
+          echo "round-trip OK"
+          kill $PID 2>/dev/null
