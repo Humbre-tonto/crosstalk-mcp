@@ -57,21 +57,37 @@ Both expose the same thing:
 Pick any `channel` name; both sides use the same one. `type` is a free-text label
 (`NOTE`, `QUESTION`, `ANSWER`, `DONE`, …) you choose for your workflow.
 
-## 60-second start (Docker)
+## Install & run
 
+Pick one. All listen on port `8765`; set `RELAY_TOKEN` to require auth.
+
+**Python (PyPI):**
 ```bash
-docker build -t crosstalk-mcp java/      # or:  python/
-docker run -d -p 8765:8765 -e RELAY_TOKEN=$(openssl rand -hex 16) -v relay-data:/data crosstalk-mcp
+uvx crosstalk-mcp                      # zero-install, or:
+pip install crosstalk-mcp && crosstalk-mcp
+# with auth:  RELAY_TOKEN=$(openssl rand -hex 16) crosstalk-mcp
 ```
 
-Then, on each machine:
+**Docker (GHCR):**
+```bash
+docker run -d -p 8765:8765 -e RELAY_TOKEN=$(openssl rand -hex 16) -v relay-data:/data \
+  ghcr.io/humbre-tonto/crosstalk-mcp-python:latest    # or: ...-java:latest
+```
+
+**Java (jar):** grab `crosstalk-mcp-<version>.jar` from [Releases](https://github.com/Humbre-tonto/crosstalk-mcp/releases) (needs JDK 17):
+```bash
+PORT=8765 RELAY_TOKEN=secret java -jar crosstalk-mcp-1.0.0.jar
+```
+
+Building from source instead? See [java/](java) · [python/](python).
+
+## Connect your agents (on each machine)
 
 ```bash
 claude mcp add --transport http crosstalk http://<HOST>:8765/mcp \
   --header "Authorization: Bearer <your-token>"
 ```
-
-Full per-edition instructions: [java/](java) · [python/](python).
+(Drop `--header` if you're running without `RELAY_TOKEN`.)
 
 ## How two agents converse
 
