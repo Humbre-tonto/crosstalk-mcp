@@ -1,0 +1,26 @@
+# Runtime SQLite database (and WAL/journal)
+relay.db
+relay.db-*
+*.db
+*.db-shm
+*.db-wal
+
+# Build output (java edition)
+target/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
