@@ -8,19 +8,24 @@ Transport: streamable HTTP MCP at /mcp; a small REST mirror under /api.
 Auth:      optional shared bearer token via env RELAY_TOKEN (enforced only if set).
 Storage:   SQLite (env RELAY_DB, default relay.db), durable across restarts.
 
-Tools / endpoints: post_message, get_messages, list_channels.
+Tools:      post_message, get_messages, wait_for_message, list_channels.
+Endpoints:  GET/POST /api/channels/{channel}/messages, GET .../wait (long-poll),
+            GET .../stream (SSE), GET /api/channels.
 Run:  RELAY_TOKEN=secret PORT=8765 python crosstalk_mcp.py
 """
 
+import asyncio
+import json
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 import uvicorn
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from mcp.server.fastmcp import FastMCP
 
 RELAY_TOKEN = os.environ.get("RELAY_TOKEN")
@@ -30,10 +35,32 @@ PORT = int(os.environ.get("PORT", "8765"))
 
 _write_lock = threading.Lock()
 
+# ----- in-process event bus (Phase 0) -----
+# The relay stays a transport, not a brain: we don't push message payloads through the bus.
+# We just wake anyone waiting, and they re-read the DB by cursor (since_id). This keeps every
+# consumer (wait_for_message, SSE) reconnect-safe and never lets a wakeup lose a message.
+_notify = threading.Condition()
+
+# ----- additive schema migration (Phase 0) -----
+# New columns are always nullable and added here, never by rewriting the base table, so old
+# relay.db files and the original three-tool contract keep working untouched. Names are fixed
+# constants (no user input) -> safe to interpolate into ALTER TABLE.
+_EXTRA_COLUMNS: dict[str, str] = {
+    "session_id": "TEXT",  # forward-ready for the opt-in Phase 1 session grouping (nullable)
+}
+
+
+def _ensure_columns(c: sqlite3.Connection) -> None:
+    """Add any missing nullable columns to `messages` (additive, idempotent)."""
+    existing = {row["name"] for row in c.execute("PRAGMA table_info(messages)").fetchall()}
+    for name, decl in _EXTRA_COLUMNS.items():
+        if name not in existing:
+            c.execute(f"ALTER TABLE messages ADD COLUMN {name} {decl}")
+
 
 def _conn() -> sqlite3.Connection:
-    """Open a connection and ensure the schema (cheap IF NOT EXISTS) so the relay
-    self-heals if the db file is ever deleted/recreated empty while running."""
+    """Open a connection and ensure the schema (cheap IF NOT EXISTS + additive columns) so the
+    relay self-heals if the db file is ever deleted/recreated empty while running."""
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     c.execute(
@@ -46,6 +73,7 @@ def _conn() -> sqlite3.Connection:
             created_at TEXT NOT NULL)"""
     )
     c.execute("CREATE INDEX IF NOT EXISTS idx_channel_id ON messages(channel, id)")
+    _ensure_columns(c)
     return c
 
 
@@ -56,7 +84,11 @@ def _post(channel: str, sender: str, type_: str, body: str) -> dict[str, Any]:
             "INSERT INTO messages(channel,sender,type,body,created_at) VALUES(?,?,?,?,?)",
             (channel, sender, type_, body, ts),
         )
-        return {"id": cur.lastrowid, "channel": channel, "created_at": ts}
+        result = {"id": cur.lastrowid, "channel": channel, "created_at": ts}
+    # Wake any waiters *after* the row is committed, so their next _get sees it.
+    with _notify:
+        _notify.notify_all()
+    return result
 
 
 def _get(channel: str, since_id: int = 0) -> list[dict[str, Any]]:
@@ -67,6 +99,22 @@ def _get(channel: str, since_id: int = 0) -> list[dict[str, Any]]:
             (channel, since_id),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def _wait(channel: str, since_id: int = 0, timeout_s: float = 30.0) -> list[dict[str, Any]]:
+    """Block until a message with id > since_id exists, or timeout. Returns the new
+    messages (oldest first) or [] on timeout. Correct against lost wakeups: the poster's
+    notify can only fire once a waiter is actually waiting on the condition."""
+    deadline = time.monotonic() + timeout_s
+    with _notify:
+        while True:
+            msgs = _get(channel, since_id)
+            if msgs:
+                return msgs
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            _notify.wait(remaining)
 
 
 def _channels() -> list[dict[str, Any]]:
@@ -103,6 +151,19 @@ def get_messages(channel: str, since_id: int = 0) -> list:
 
 
 @mcp.tool()
+def wait_for_message(channel: str, since_id: int = 0, timeout_s: float = 30.0) -> list:
+    """Block until a message with id greater than since_id appears, then return it.
+
+    This is the "continuous talk" primitive: post your reply, then call
+    wait_for_message(channel, <your last id>) to block until the peer answers, and loop -
+    no busy-polling. Returns the new messages (oldest first), or [] on timeout so you can
+    loop again or stop. timeout_s is capped at 300 seconds.
+    """
+    timeout_s = max(0.0, min(float(timeout_s), 300.0))
+    return _wait(channel, since_id, timeout_s)
+
+
+@mcp.tool()
 def list_channels() -> list:
     """List channels with message count, last id, and last activity timestamp."""
     return _channels()
@@ -126,6 +187,47 @@ async def rest_post(request: Request) -> JSONResponse:
     channel = request.path_params["channel"]
     data = await request.json()
     return JSONResponse(_post(channel, data["sender"], data["type"], data["body"]))
+
+
+@mcp.custom_route("/api/channels/{channel}/wait", methods=["GET"])
+async def rest_wait(request: Request) -> JSONResponse:
+    """Long-poll mirror of wait_for_message. Blocks (in a worker thread) until a new
+    message arrives or timeout_s elapses; returns the new messages or []."""
+    channel = request.path_params["channel"]
+    since_id = int(request.query_params.get("since_id", "0"))
+    timeout_s = max(0.0, min(float(request.query_params.get("timeout_s", "30")), 300.0))
+    msgs = await asyncio.to_thread(_wait, channel, since_id, timeout_s)
+    return JSONResponse(msgs)
+
+
+@mcp.custom_route("/api/channels/{channel}/stream", methods=["GET"])
+async def rest_stream(request: Request) -> StreamingResponse:
+    """Server-Sent Events stream of a channel. Emits each new message as a `data:` event
+    (JSON), plus periodic keep-alive comments. Cursor-based via ?since_id= so reconnects
+    never miss messages. This is what the live UI consumes."""
+    channel = request.path_params["channel"]
+    since_id = int(request.query_params.get("since_id", "0"))
+
+    async def gen():
+        cursor = since_id
+        # Announce the current cursor so clients can resync on reconnect.
+        yield f"event: ready\ndata: {json.dumps({'channel': channel, 'since_id': cursor})}\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                msgs = await asyncio.to_thread(_get, channel, cursor)
+            except Exception:
+                break
+            if msgs:
+                for m in msgs:
+                    cursor = m["id"]
+                    yield f"data: {json.dumps(m)}\n\n"
+            else:
+                yield ": keep-alive\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 class _BearerTokenMiddleware:
