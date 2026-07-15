@@ -17,6 +17,8 @@ venv/
 build/
 dist/
 .pytest_cache/
+*.log
+server_output.log
 
 # IDE
 .idea/

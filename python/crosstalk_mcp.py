@@ -20,12 +20,13 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import uvicorn
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse, Response
 from mcp.server.fastmcp import FastMCP
 
 RELAY_TOKEN = os.environ.get("RELAY_TOKEN")
@@ -41,12 +42,91 @@ _write_lock = threading.Lock()
 # consumer (wait_for_message, SSE) reconnect-safe and never lets a wakeup lose a message.
 _notify = threading.Condition()
 
+# ----- in-process session state (Phase 1) -----
+_sessions: dict[str, dict[str, Any]] = {}
+
+# ----- in-memory presence / online participants state (Phase 3) -----
+_online_participants: dict[str, dict[str, dict[str, Any]]] = {}
+
+
+def _register_agent_presence(channel: str, sender: str) -> None:
+    if sender == "human" or sender.startswith("human"):
+        return
+    if channel in _online_participants and sender in _online_participants[channel]:
+        if _online_participants[channel][sender]["kind"] == "human":
+            return
+    if channel not in _online_participants:
+        _online_participants[channel] = {}
+
+    sender_lower = sender.lower()
+    if sender_lower.endswith("x") or "-a" in sender_lower or "agent-a" in sender_lower:
+        side = "X"
+    elif sender_lower.endswith("y") or "-b" in sender_lower or "agent-b" in sender_lower:
+        side = "Y"
+    else:
+        side = "X" if any(char in sender_lower for char in ["x", "a"]) else "Y"
+
+    _online_participants[channel][sender] = {
+        "id": sender,
+        "display_name": sender,
+        "kind": "agent",
+        "side": side,
+        "last_seen": time.time()
+    }
+
+
+def _prune_old_participants(channel: str) -> None:
+    if channel not in _online_participants:
+        return
+    now = time.time()
+    to_remove = []
+    for pid, p in list(_online_participants[channel].items()):
+        if now - p.get("last_seen", 0) > 60.0:
+            to_remove.append(pid)
+    for pid in to_remove:
+        _online_participants[channel].pop(pid, None)
+
+
+def _start_session(channel: str, max_turns: int | None = None) -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
+    _sessions[channel] = {
+        "session_id": session_id,
+        "max_turns": max_turns,
+        "turn_count": 0,
+        "done_senders": set(),
+    }
+    return {"channel": channel, "session_id": session_id, "max_turns": max_turns, "status": "active"}
+
+
+def _end_session(channel: str) -> dict[str, Any]:
+    if channel in _sessions:
+        info = _sessions.pop(channel)
+        return {"channel": channel, "session_id": info["session_id"], "status": "ended"}
+    return {"channel": channel, "status": "no_active_session"}
+
+
+def _get_session(channel: str) -> dict[str, Any] | None:
+    if channel in _sessions:
+        sess = _sessions[channel]
+        return {
+            "session_id": sess["session_id"],
+            "max_turns": sess["max_turns"],
+            "turn_count": sess["turn_count"],
+            "status": "active"
+        }
+    return None
+
+
 # ----- additive schema migration (Phase 0) -----
 # New columns are always nullable and added here, never by rewriting the base table, so old
 # relay.db files and the original three-tool contract keep working untouched. Names are fixed
 # constants (no user input) -> safe to interpolate into ALTER TABLE.
 _EXTRA_COLUMNS: dict[str, str] = {
     "session_id": "TEXT",  # forward-ready for the opt-in Phase 1 session grouping (nullable)
+    "recipient": "TEXT",
+    "reply_to": "INTEGER",
+    "status": "TEXT",
+    "side": "TEXT",
 }
 
 
@@ -77,14 +157,70 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
-def _post(channel: str, sender: str, type_: str, body: str) -> dict[str, Any]:
+def _post(
+    channel: str,
+    sender: str,
+    type_: str,
+    body: str,
+    session_id: str | None = None,
+    recipient: str | None = None,
+    reply_to: int | None = None,
+    status: str | None = None,
+    side: str | None = None,
+) -> dict[str, Any]:
+    _register_agent_presence(channel, sender)
+    # Manage session automatically if active
+    if channel in _sessions:
+        sess = _sessions[channel]
+        if not session_id:
+            session_id = sess["session_id"]
+        sess["turn_count"] += 1
+
+        if type_.upper() == "DONE":
+            sess["done_senders"].add(sender)
+
+        # Check for auto-stop conditions
+        auto_stop = False
+        if len(sess["done_senders"]) >= 2:
+            auto_stop = True
+        elif sess["max_turns"] is not None and sess["turn_count"] >= sess["max_turns"]:
+            auto_stop = True
+
+        if auto_stop:
+            # End the session
+            _sessions.pop(channel, None)
+
     ts = datetime.now(timezone.utc).isoformat()
+    # Default status to open for questions
+    if type_.upper() == "QUESTION" and not status:
+        status = "open"
+
     with _write_lock, _conn() as c:
+        # If this is an answer replying to a question, update the question's status to "answered"
+        if type_.upper() == "ANSWER" and reply_to:
+            c.execute(
+                "UPDATE messages SET status='answered' WHERE id=? AND type='QUESTION'",
+                (reply_to,),
+            )
+
         cur = c.execute(
-            "INSERT INTO messages(channel,sender,type,body,created_at) VALUES(?,?,?,?,?)",
-            (channel, sender, type_, body, ts),
+            "INSERT INTO messages(channel,sender,type,body,created_at,session_id,recipient,reply_to,status,side) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (channel, sender, type_, body, ts, session_id, recipient, reply_to, status, side),
         )
-        result = {"id": cur.lastrowid, "channel": channel, "created_at": ts}
+        result = {
+            "id": cur.lastrowid,
+            "channel": channel,
+            "sender": sender,
+            "type": type_,
+            "body": body,
+            "created_at": ts,
+            "session_id": session_id,
+            "recipient": recipient,
+            "reply_to": reply_to,
+            "status": status,
+            "side": side,
+        }
     # Wake any waiters *after* the row is committed, so their next _get sees it.
     with _notify:
         _notify.notify_all()
@@ -94,8 +230,8 @@ def _post(channel: str, sender: str, type_: str, body: str) -> dict[str, Any]:
 def _get(channel: str, since_id: int = 0) -> list[dict[str, Any]]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT id,channel,sender,type,body,created_at FROM messages "
-            "WHERE channel=? AND id>? ORDER BY id",
+            "SELECT id,channel,sender,type,body,created_at,session_id,recipient,reply_to,status,side "
+            "FROM messages WHERE channel=? AND id>? ORDER BY id",
             (channel, since_id),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -131,14 +267,46 @@ mcp = FastMCP("crosstalk", host=HOST, port=PORT)
 
 # ----- MCP tools -----
 @mcp.tool()
-def post_message(channel: str, sender: str, type: str, body: str) -> dict:
-    """Append a message to a channel mailbox and return its id.
+def post_message(
+    channel: str,
+    sender: str,
+    type: str,
+    body: str,
+    session_id: str | None = None,
+    recipient: str | None = None,
+    reply_to: int | None = None,
+    status: str | None = None,
+    side: str | None = None,
+) -> dict:
+    """Append a message to a channel mailbox and return its details.
 
     Treat the channel as a shared, possibly internet-reachable bus - do not post secrets.
     channel: e.g. "my-project"; sender: e.g. "agent-a"; type: free-text label
     (NOTE/QUESTION/ANSWER/DONE...); body: the content.
     """
-    return _post(channel, sender, type, body)
+    return _post(channel, sender, type, body, session_id, recipient, reply_to, status, side)
+
+
+@mcp.tool()
+def start_session(channel: str, max_turns: int | None = None) -> dict:
+    """Start an opt-in session grouping messages on a channel.
+
+    A session enables turn counting and automatic ending of the session when max_turns
+    is exceeded, or when both sides (at least 2 distinct senders) post a 'DONE' message.
+    """
+    return _start_session(channel, max_turns)
+
+
+@mcp.tool()
+def end_session(channel: str) -> dict:
+    """Explicitly end the active session on a channel."""
+    return _end_session(channel)
+
+
+@mcp.tool()
+def get_session(channel: str) -> dict:
+    """Get the active session details for a channel, if any."""
+    return _get_session(channel) or {"status": "no_active_session"}
 
 
 @mcp.tool()
@@ -186,7 +354,47 @@ async def rest_get(request: Request) -> JSONResponse:
 async def rest_post(request: Request) -> JSONResponse:
     channel = request.path_params["channel"]
     data = await request.json()
-    return JSONResponse(_post(channel, data["sender"], data["type"], data["body"]))
+    return JSONResponse(
+        _post(
+            channel,
+            data["sender"],
+            data["type"],
+            data["body"],
+            session_id=data.get("session_id"),
+            recipient=data.get("recipient"),
+            reply_to=data.get("reply_to"),
+            status=data.get("status"),
+            side=data.get("side"),
+        )
+    )
+
+
+@mcp.custom_route("/api/channels/{channel}/session", methods=["POST"])
+async def rest_start_session(request: Request) -> JSONResponse:
+    channel = request.path_params["channel"]
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    max_turns = data.get("max_turns")
+    if max_turns is not None:
+        max_turns = int(max_turns)
+    return JSONResponse(_start_session(channel, max_turns))
+
+
+@mcp.custom_route("/api/channels/{channel}/session", methods=["DELETE"])
+async def rest_end_session(request: Request) -> JSONResponse:
+    channel = request.path_params["channel"]
+    return JSONResponse(_end_session(channel))
+
+
+@mcp.custom_route("/api/channels/{channel}/session", methods=["GET"])
+async def rest_get_session(request: Request) -> JSONResponse:
+    channel = request.path_params["channel"]
+    info = _get_session(channel)
+    if info:
+        return JSONResponse(info)
+    return JSONResponse({"status": "no_active_session"}, status_code=404)
 
 
 @mcp.custom_route("/api/channels/{channel}/wait", methods=["GET"])
@@ -208,26 +416,79 @@ async def rest_stream(request: Request) -> StreamingResponse:
     channel = request.path_params["channel"]
     since_id = int(request.query_params.get("since_id", "0"))
 
+    # Track presence from query parameters
+    pid = request.query_params.get("participant_id")
+    display_name = request.query_params.get("display_name", pid)
+    kind = request.query_params.get("kind", "human")
+    side = request.query_params.get("side", "")
+
+    if pid:
+        if channel not in _online_participants:
+            _online_participants[channel] = {}
+        _online_participants[channel][pid] = {
+            "id": pid,
+            "display_name": display_name,
+            "kind": kind,
+            "side": side,
+            "last_seen": time.time()
+        }
+
     async def gen():
         cursor = since_id
         # Announce the current cursor so clients can resync on reconnect.
         yield f"event: ready\ndata: {json.dumps({'channel': channel, 'since_id': cursor})}\n\n"
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                msgs = await asyncio.to_thread(_get, channel, cursor)
-            except Exception:
-                break
-            if msgs:
-                for m in msgs:
-                    cursor = m["id"]
-                    yield f"data: {json.dumps(m)}\n\n"
-            else:
-                yield ": keep-alive\n\n"
-            await asyncio.sleep(1.0)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                # Keep-alive/heartbeat: update the participant's last_seen
+                if pid and channel in _online_participants and pid in _online_participants[channel]:
+                    _online_participants[channel][pid]["last_seen"] = time.time()
+
+                try:
+                    msgs = await asyncio.to_thread(_get, channel, cursor)
+                except Exception:
+                    break
+                if msgs:
+                    for m in msgs:
+                        cursor = m["id"]
+                        yield f"data: {json.dumps(m)}\n\n"
+                else:
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(1.0)
+        finally:
+            # Clean up presence when connection is closed
+            if pid and channel in _online_participants and pid in _online_participants[channel]:
+                _online_participants[channel].pop(pid, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@mcp.custom_route("/api/channels/{channel}/presence", methods=["GET"])
+async def rest_presence(request: Request) -> JSONResponse:
+    channel = request.path_params["channel"]
+    _prune_old_participants(channel)
+    participants = list(_online_participants.get(channel, {}).values())
+    return JSONResponse(participants)
+
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def rest_ui(_request: Request) -> Response:
+    """Serve the static Discord-style dashboard assets."""
+    ui_path = os.path.join(os.path.dirname(__file__), "ui.html")
+    try:
+        with open(ui_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+    except Exception as e:
+        html_content = f"<h1>Error loading UI</h1><p>{str(e)}</p>"
+    return Response(content=html_content, media_type="text/html")
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def rest_index(_request: Request) -> Response:
+    """Redirect home route to /ui."""
+    return Response(status_code=307, headers={"Location": "/ui"})
 
 
 class _BearerTokenMiddleware:
@@ -240,11 +501,37 @@ class _BearerTokenMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http":
+            path = scope.get("path", "")
+            # Exempt UI routes from the bearer token gate so the browser can load /ui first
+            if path in ["/", "/ui"]:
+                await self.app(scope, receive, send)
+                return
+
             headers = dict(scope.get("headers") or [])
             auth = headers.get(b"authorization", b"").decode()
-            if auth != f"Bearer {self.token}":
+
+            import hmac
+            token_matched = False
+
+            # 1. Check Bearer Authorization header using constant-time comparison
+            if auth.startswith("Bearer "):
+                provided_token = auth[7:]
+                if hmac.compare_digest(provided_token, self.token):
+                    token_matched = True
+
+            # 2. Check query parameters (necessary for EventSource SSE stream connections)
+            if not token_matched:
+                query_string = scope.get("query_string", b"").decode()
+                import urllib.parse
+                params = urllib.parse.parse_qs(query_string)
+                q_token = params.get("token", params.get("relay_token", [None]))[0]
+                if q_token and hmac.compare_digest(q_token, self.token):
+                    token_matched = True
+
+            if not token_matched:
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
+
         await self.app(scope, receive, send)
 
 

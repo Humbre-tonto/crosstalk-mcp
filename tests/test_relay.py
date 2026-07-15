@@ -177,3 +177,83 @@ def test_sse_stream(db_isolation):
         assert found, "Message body not found in SSE stream"
 
     asyncio.run(_test())
+
+
+def test_session_turn_counting_and_limits(db_isolation):
+    """Test start_session, turn counting, max_turns limit and end_session."""
+    # Initially no session
+    assert crosstalk_mcp._get_session("test_sess_ch") is None
+
+    # Start session with max_turns = 2
+    sess_info = crosstalk_mcp._start_session("test_sess_ch", max_turns=2)
+    assert sess_info["status"] == "active"
+    assert sess_info["max_turns"] == 2
+
+    active = crosstalk_mcp._get_session("test_sess_ch")
+    assert active is not None
+    assert active["turn_count"] == 0
+
+    # Post message 1 -> turn count = 1
+    crosstalk_mcp._post("test_sess_ch", "agent-a", "NOTE", "msg1")
+    active = crosstalk_mcp._get_session("test_sess_ch")
+    assert active is not None
+    assert active["turn_count"] == 1
+
+    # Post message 2 -> turn count = 2 -> auto-stop triggers since max_turns = 2
+    crosstalk_mcp._post("test_sess_ch", "agent-b", "NOTE", "msg2")
+    assert crosstalk_mcp._get_session("test_sess_ch") is None
+
+
+def test_session_done_auto_stop(db_isolation):
+    """Test session auto-stops when both sides post 'DONE'."""
+    crosstalk_mcp._start_session("done_ch")
+
+    # Post DONE from side 1
+    crosstalk_mcp._post("done_ch", "agent-a", "DONE", "finished")
+    assert crosstalk_mcp._get_session("done_ch") is not None
+
+    # Post DONE from side 2 -> auto-stop triggers because 2 distinct senders posted DONE
+    crosstalk_mcp._post("done_ch", "agent-b", "DONE", "finished")
+    assert crosstalk_mcp._get_session("done_ch") is None
+
+
+def test_directed_qa_status_updates(db_isolation):
+    """Test directed questions start with status='open' and change to 'answered' when replied with ANSWER."""
+    # Post a QUESTION -> should default status to 'open'
+    q = crosstalk_mcp._post("qa_ch", "agent-a", "QUESTION", "What is 1+1?", recipient="humanX")
+    assert q["status"] == "open"
+    qid = q["id"]
+
+    # Retrieve and verify from db
+    msgs = crosstalk_mcp._get("qa_ch")
+    assert msgs[0]["status"] == "open"
+    assert msgs[0]["recipient"] == "humanX"
+
+    # Post an ANSWER replying to the question ID
+    ans = crosstalk_mcp._post("qa_ch", "humanX", "ANSWER", "It is 2", reply_to=qid)
+    assert ans["reply_to"] == qid
+
+    # Retrieve original question and verify status is now 'answered'
+    msgs = crosstalk_mcp._get("qa_ch")
+    question_msg = next(m for m in msgs if m["id"] == qid)
+    assert question_msg["status"] == "answered"
+
+
+def test_presence_sse_registration_and_pruning(db_isolation):
+    """Test registering presence via SSE parameters and pruning inactive agents."""
+    # Initially presence is empty
+    participants = list(crosstalk_mcp._online_participants.get("pres_ch", {}).values())
+    assert len(participants) == 0
+
+    # Simulate agent polling/posting to register presence
+    crosstalk_mcp._register_agent_presence("pres_ch", "agent-x")
+    participants = list(crosstalk_mcp._online_participants.get("pres_ch", {}).values())
+    assert len(participants) == 1
+    assert participants[0]["id"] == "agent-x"
+    assert participants[0]["kind"] == "agent"
+
+    # Fast forward time to test agent pruning (agent is inactive after 60s)
+    crosstalk_mcp._online_participants["pres_ch"]["agent-x"]["last_seen"] = time.time() - 70.0
+    crosstalk_mcp._prune_old_participants("pres_ch")
+    participants = list(crosstalk_mcp._online_participants.get("pres_ch", {}).values())
+    assert len(participants) == 0
