@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crosstalk MCP Relay</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Marked JS for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- FontAwesome for beautiful icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        discord: {
+                            darkest: '#1e1f22',
+                            sidebar: '#2b2d31',
+                            chat: '#313338',
+                            hover: '#35373c',
+                            text: '#dbdee1',
+                            muted: '#949ba4',
+                            accent: '#5865f2',
+                            accentHover: '#4752c4',
+                            online: '#23a55a'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom scrollbar to match Discord look */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #2e3035;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1a1b1e;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #111214;
+        }
+        code {
+            background-color: #2b2d31;
+            padding: 2px 4px;
+            border-radius: 4px;
+            font-family: monospace;
+            color: #e3e5e8;
+        }
+        pre code {
+            background-color: transparent;
+            padding: 0;
+        }
+        pre {
+            background-color: #1e1f22;
+            padding: 8px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 6px 0;
+            border: 1px solid #3f4248;
+        }
+    </style>
+</head>
+<body class="bg-discord-darkest text-discord-text h-screen flex flex-col overflow-hidden font-sans">
+
+    <!-- Top Connection / Auth Banner if needed (optional) -->
+    <div id="authBanner" class="bg-amber-600 text-white text-xs px-4 py-1 flex justify-between items-center hidden">
+        <span><i class="fa-solid fa-triangle-exclamation mr-1"></i> Running with token authentication. Authenticated!</span>
+    </div>
+
+    <div class="flex-1 flex overflow-hidden">
+
+        <!-- Left Sidebar: Channel List & Identity -->
+        <div class="w-64 bg-discord-sidebar flex flex-col select-none">
+
+            <!-- Sidebar Header -->
+            <div class="h-12 border-b border-discord-darkest flex items-center justify-between px-4 font-bold text-white shadow-sm">
+                <span class="flex items-center gap-2">
+                    <i class="fa-solid fa-comments text-discord-accent text-lg"></i>
+                    <span>Crosstalk Relay</span>
+                </span>
+            </div>
+
+            <!-- Channels Section -->
+            <div class="flex-1 overflow-y-auto px-2 py-4 space-y-4">
+                <div>
+                    <div class="flex items-center justify-between text-xs font-bold text-discord-muted uppercase px-2 mb-2 tracking-wider">
+                        <span>Channels</span>
+                        <button onclick="promptCreateChannel()" class="hover:text-white transition-colors" title="Create Channel">
+                            <i class="fa-solid fa-plus text-sm"></i>
+                        </button>
+                    </div>
+                    <div id="channelList" class="space-y-0.5">
+                        <!-- Channels loaded dynamically -->
+                        <div class="animate-pulse h-8 bg-discord-hover rounded mx-2"></div>
+                    </div>
+                </div>
+
+                <!-- Session Control Widget -->
+                <div class="border-t border-discord-darkest pt-4">
+                    <div class="text-xs font-bold text-discord-muted uppercase px-2 mb-2 tracking-wider flex justify-between items-center">
+                        <span>Active Session</span>
+                        <span id="sessionStatusDot" class="w-2.5 h-2.5 rounded-full bg-red-500"></span>
+                    </div>
+                    <div id="sessionWidget" class="bg-discord-darkest/40 rounded-lg p-2.5 mx-1 text-xs space-y-2">
+                        <p id="sessionInfoText" class="text-discord-muted">No active session on this channel.</p>
+                        <div id="sessionActions" class="flex gap-1.5 pt-1">
+                            <button onclick="promptStartSession()" class="flex-1 bg-discord-accent hover:bg-discord-accentHover text-white font-semibold py-1 px-2 rounded transition-colors">
+                                Start Session
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Current User profile area -->
+            <div class="h-14 bg-discord-darkest flex items-center justify-between px-3">
+                <div class="flex items-center gap-2 overflow-hidden cursor-pointer" onclick="openIdentityModal()">
+                    <div id="currentUserAvatar" class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-white shadow-inner select-none transition-transform hover:scale-105">
+                        HU
+                    </div>
+                    <div class="overflow-hidden leading-tight">
+                        <div id="currentUserName" class="font-semibold text-sm text-white truncate">Human User</div>
+                        <div id="currentUserRole" class="text-xs text-discord-muted truncate">humanX (Side X)</div>
+                    </div>
+                </div>
+                <button onclick="openIdentityModal()" class="text-discord-muted hover:text-white transition-colors p-1.5 rounded hover:bg-discord-hover" title="Edit Identity">
+                    <i class="fa-solid fa-gear text-lg"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Chat Area -->
+        <div class="flex-1 bg-discord-chat flex flex-col overflow-hidden relative">
+
+            <!-- Chat Header -->
+            <div class="h-12 border-b border-discord-darkest flex items-center justify-between px-6 shadow-sm z-10 bg-discord-chat/95">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-hashtag text-discord-muted text-xl"></i>
+                    <span id="activeChannelHeaderName" class="font-bold text-white text-base">general</span>
+                </div>
+                <div class="flex items-center gap-4 text-sm">
+                    <div id="connectionStatus" class="flex items-center gap-1.5 text-discord-online font-medium">
+                        <span class="w-2 h-2 rounded-full bg-discord-online animate-ping"></span>
+                        <span>SSE Live</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Messages Stream Container -->
+            <div id="messageContainer" class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                <!-- Messages appended dynamically -->
+                <div class="flex items-center justify-center h-full text-discord-muted">
+                    <div class="text-center">
+                        <i class="fa-solid fa-spinner fa-spin text-3xl text-discord-accent mb-2"></i>
+                        <p>Connecting and loading channel history...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reply Target Banner (above composer) -->
+            <div id="replyTargetBanner" class="bg-discord-sidebar px-6 py-2 border-t border-discord-darkest flex justify-between items-center text-xs hidden animate-slide-up">
+                <div class="flex items-center gap-2 text-discord-muted">
+                    <i class="fa-solid fa-reply"></i>
+                    <span>Replying to <b id="replyTargetSender" class="text-white">agent-a</b>: "<span id="replyTargetSnippet" class="italic">...</span>"</span>
+                </div>
+                <button onclick="cancelReply()" class="text-discord-muted hover:text-white transition-colors">
+                    <i class="fa-solid fa-circle-xmark text-sm"></i>
+                </button>
+            </div>
+
+            <!-- Composer (bottom input) -->
+            <div class="px-6 pb-6 pt-2 bg-discord-chat">
+                <div class="bg-[#383a40] rounded-lg p-2.5 flex flex-col gap-2 shadow-inner">
+                    <!-- Composer options row -->
+                    <div class="flex flex-wrap items-center gap-2 text-xs select-none">
+                        <!-- Message Type selection -->
+                        <div class="flex items-center gap-1 bg-discord-darkest px-2 py-1 rounded">
+                            <span class="text-discord-muted font-semibold">Type:</span>
+                            <select id="msgType" class="bg-transparent text-white font-bold outline-none cursor-pointer" onchange="onMsgTypeChange()">
+                                <option value="NOTE" class="bg-discord-sidebar">NOTE</option>
+                                <option value="QUESTION" class="bg-discord-sidebar">QUESTION</option>
+                                <option value="ANSWER" class="bg-discord-sidebar">ANSWER</option>
+                                <option value="INTERRUPT" class="bg-discord-sidebar">INTERRUPT</option>
+                                <option value="DONE" class="bg-discord-sidebar">DONE</option>
+                            </select>
+                        </div>
+
+                        <!-- Recipient Selection (especially for QUESTION/ANSWER) -->
+                        <div id="recipientSelector" class="flex items-center gap-1 bg-discord-darkest px-2 py-1 rounded">
+                            <span class="text-discord-muted font-semibold">Recipient:</span>
+                            <select id="msgRecipient" class="bg-transparent text-white outline-none cursor-pointer">
+                                <option value="" class="bg-discord-sidebar">any-human</option>
+                                <!-- Populated dynamically from presence -->
+                            </select>
+                        </div>
+
+                        <!-- Side Selection -->
+                        <div class="flex items-center gap-1 bg-discord-darkest px-2 py-1 rounded">
+                            <span class="text-discord-muted font-semibold">Side:</span>
+                            <select id="msgSide" class="bg-transparent text-white outline-none cursor-pointer">
+                                <option value="" class="bg-discord-sidebar">none</option>
+                                <option value="X" class="bg-discord-sidebar">Side X</option>
+                                <option value="Y" class="bg-discord-sidebar">Side Y</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Composer core input text -->
+                    <div class="flex items-end gap-2">
+                        <textarea id="composerInput" rows="1" placeholder="Send a message to general (Enter to send, Shift+Enter for new line)..."
+                            class="flex-1 bg-transparent text-white outline-none resize-none placeholder-discord-muted text-sm max-h-32 py-1.5"
+                            onkeydown="handleComposerKey(event)" oninput="autoExpandTextarea(this)"></textarea>
+                        <button onclick="sendMessage()" class="bg-discord-accent hover:bg-discord-accentHover text-white px-4 py-2 rounded-md font-semibold text-sm transition-colors flex items-center justify-center shadow-md">
+                            <i class="fa-solid fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Sidebar: Active Users / Presence List -->
+        <div class="w-60 bg-discord-sidebar border-l border-discord-darkest flex flex-col select-none">
+            <div class="h-12 border-b border-discord-darkest flex items-center px-4 font-bold text-white shadow-sm text-sm uppercase tracking-wider text-discord-muted">
+                <span>Active Users</span>
+            </div>
+            <div id="presenceList" class="flex-1 overflow-y-auto p-3 space-y-4 text-sm">
+                <!-- Group Side X -->
+                <div>
+                    <h3 class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Side X (0)</h3>
+                    <div id="presenceSideX" class="space-y-0.5">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
+                <!-- Group Side Y -->
+                <div>
+                    <h3 class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Side Y (0)</h3>
+                    <div id="presenceSideY" class="space-y-0.5">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
+                <!-- Group Unassigned -->
+                <div>
+                    <h3 class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Unassigned (0)</h3>
+                    <div id="presenceUnassigned" class="space-y-0.5">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- User Identity Configuration Modal -->
+    <div id="identityModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+        <div class="bg-discord-sidebar w-full max-w-md rounded-lg shadow-2xl border border-discord-darkest overflow-hidden animate-zoom-in">
+            <div class="p-5 border-b border-discord-darkest flex justify-between items-center">
+                <h2 class="text-lg font-bold text-white"><i class="fa-solid fa-user-gear text-discord-accent mr-2"></i>Configure Identity</h2>
+                <button onclick="closeIdentityModal()" class="text-discord-muted hover:text-white transition-colors" id="closeIdentityModalBtn">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                </button>
+            </div>
+            <div class="p-5 space-y-4">
+                <div class="space-y-1.5">
+                    <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Participant ID (no spaces)</label>
+                    <input type="text" id="modalPartId" placeholder="e.g. humanX"
+                        class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
+                </div>
+                <div class="space-y-1.5">
+                    <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Display Name</label>
+                    <input type="text" id="modalDispName" placeholder="e.g. Mohamed"
+                        class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
+                </div>
+                <div class="space-y-1.5">
+                    <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Side Allocation</label>
+                    <select id="modalSide" class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
+                        <option value="X">Side X (e.g. Creator / Ask Side)</option>
+                        <option value="Y">Side Y (e.g. Replier / Target Side)</option>
+                        <option value="">None (Spectator)</option>
+                    </select>
+                </div>
+                <div class="space-y-1 bg-discord-darkest/50 p-3 rounded text-xs text-discord-muted border border-discord-darkest">
+                    <p class="font-semibold text-discord-text mb-1"><i class="fa-solid fa-info-circle text-discord-accent mr-1"></i>How does identity work?</p>
+                    <p>To ask/answer questions and post interrupts directed at you, the system needs to recognize your ID. Selecting a side ensures messages are colored correctly.</p>
+                </div>
+            </div>
+            <div class="bg-discord-darkest p-4 flex justify-end gap-2.5">
+                <button onclick="closeIdentityModal()" class="text-discord-muted hover:text-white font-semibold text-sm px-4 py-2 rounded transition-colors" id="modalCancelBtn">Cancel</button>
+                <button onclick="saveIdentity()" class="bg-discord-accent hover:bg-discord-accentHover text-white font-bold text-sm px-5 py-2 rounded transition-colors shadow-md">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- UI Interaction Scripts -->
+    <script>
+        // Global State Variables
+        let currentChannel = 'general';
+        let messagesMap = {}; // channel -> array of messages
+        let activeSession = null; // current channel active session
+        let identity = { id: 'humanX', display_name: 'Human X', kind: 'human', side: 'X' };
+        let onlineParticipants = [];
+        let sseSource = null;
+        let lastMessageId = 0;
+        let replyTarget = null; // { id, sender, body }
+
+        // Load Identity from LocalStorage
+        function loadIdentity() {
+            const stored = localStorage.getItem('crosstalk_identity');
+            if (stored) {
+                try {
+                    identity = JSON.parse(stored);
+                    updateIdentityUI();
+                } catch (e) {
+                    console.error("Failed to parse identity, using defaults", e);
+                }
+            } else {
+                // Open identity modal on startup
+                setTimeout(() => {
+                    openIdentityModal({ force: true });
+                }, 100);
+            }
+        }
+
+        function updateIdentityUI() {
+            document.getElementById('currentUserName').innerText = identity.display_name;
+            document.getElementById('currentUserRole').innerText = `${identity.id} (${identity.side ? 'Side ' + identity.side : 'Spectator'})`;
+
+            // Set dynamic color for current user avatar based on ID
+            const avatar = document.getElementById('currentUserAvatar');
+            avatar.innerText = identity.display_name.substring(0, 2).toUpperCase();
+            avatar.style.backgroundColor = getDeterministicColor(identity.id);
+
+            // Prefill current values incomposer if matches
+            document.getElementById('msgSide').value = identity.side || "";
+        }
+
+        function openIdentityModal(opts = {}) {
+            document.getElementById('modalPartId').value = identity.id;
+            document.getElementById('modalDispName').value = identity.display_name;
+            document.getElementById('modalSide').value = identity.side || "";
+
+            const cancelBtn = document.getElementById('modalCancelBtn');
+            const closeBtn = document.getElementById('closeIdentityModalBtn');
+            if (opts.force) {
+                cancelBtn.classList.add('hidden');
+                closeBtn.classList.add('hidden');
+            } else {
+                cancelBtn.classList.remove('hidden');
+                closeBtn.classList.remove('hidden');
+            }
+
+            document.getElementById('identityModal').classList.remove('hidden');
+        }
+
+        function closeIdentityModal() {
+            document.getElementById('identityModal').classList.add('hidden');
+        }
+
+        function saveIdentity() {
+            const pid = document.getElementById('modalPartId').value.trim().replace(/\s+/g, '');
+            const disp = document.getElementById('modalDispName').value.trim();
+            const side = document.getElementById('modalSide').value;
+
+            if (!pid || !disp) {
+                alert("Participant ID and Display Name are required!");
+                return;
+            }
+
+            identity = { id: pid, display_name: disp, kind: 'human', side: side };
+            localStorage.setItem('crosstalk_identity', JSON.stringify(identity));
+
+            updateIdentityUI();
+            closeIdentityModal();
+
+            // Re-establish SSE connection to announce new presence!
+            connectSSE();
+        }
+
+        // Color generator for avatar based on hash of string
+        function getDeterministicColor(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            // Generate pleasant pastel color
+            const h = Math.abs(hash % 360);
+            return `hsl(${h}, 60%, 45%)`;
+        }
+
+        // Auto-expand composer textarea height
+        function autoExpandTextarea(el) {
+            el.style.height = 'auto';
+            el.style.height = el.scrollHeight + 'px';
+        }
+
+        // Fetch Channels
+        async function fetchChannels() {
+            try {
+                const response = await fetch('/api/channels');
+                if (response.ok) {
+                    const channels = await response.json();
+                    renderChannels(channels);
+                }
+            } catch (e) {
+                console.error("Error fetching channels:", e);
+            }
+        }
+
+        function renderChannels(channels) {
+            const channelListEl = document.getElementById('channelList');
+            if (channels.length === 0) {
+                channelListEl.innerHTML = `
+                    <div onclick="selectChannel('general')" class="flex items-center justify-between px-2 py-1.5 rounded cursor-pointer text-discord-muted hover:bg-discord-hover hover:text-discord-text">
+                        <span class="flex items-center gap-2">
+                            <i class="fa-solid fa-hashtag"></i>
+                            <span>general</span>
+                        </span>
+                    </div>
+                `;
+                return;
+            }
+
+            channelListEl.innerHTML = channels.map(ch => {
+                const isActive = ch.channel === currentChannel;
+                const activeClass = isActive ? 'bg-discord-hover text-white font-semibold' : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text';
+
+                return `
+                    <div onclick="selectChannel('${ch.channel}')" class="flex items-center justify-between px-2 py-1.5 rounded cursor-pointer transition-colors ${activeClass}">
+                        <span class="flex items-center gap-2 overflow-hidden truncate">
+                            <i class="fa-solid fa-hashtag text-discord-muted"></i>
+                            <span class="truncate">${ch.channel}</span>
+                        </span>
+                        <span class="bg-discord-darkest text-discord-muted text-[10px] font-bold px-1.5 py-0.5 rounded-full select-none" title="Total messages">
+                            ${ch.count}
+                        </span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function promptCreateChannel() {
+            const name = prompt("Enter a new channel name:");
+            if (name) {
+                const cleanName = name.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+                if (cleanName) {
+                    selectChannel(cleanName);
+                }
+            }
+        }
+
+        // Channel selection
+        async function selectChannel(channel) {
+            if (currentChannel !== channel) {
+                cancelReply();
+            }
+            currentChannel = channel;
+            document.getElementById('activeChannelHeaderName').innerText = channel;
+
+            // Clean active chat stream UI & show Loading indicator
+            const container = document.getElementById('messageContainer');
+            container.innerHTML = `
+                <div class="flex items-center justify-center h-full text-discord-muted">
+                    <div class="text-center">
+                        <i class="fa-solid fa-spinner fa-spin text-3xl text-discord-accent mb-2"></i>
+                        <p>Loading channel history...</p>
+                    </div>
+                </div>
+            `;
+
+            // Reset state
+            messagesMap[channel] = [];
+            lastMessageId = 0;
+
+            // Fetch History & active session details
+            await Promise.all([
+                fetchHistory(),
+                fetchSessionStatus(),
+                fetchChannels()
+            ]);
+
+            // Setup Event Source (SSE)
+            connectSSE();
+        }
+
+        // Fetch History
+        async function fetchHistory() {
+            try {
+                const response = await fetch(`/api/channels/${currentChannel}/messages`);
+                if (response.ok) {
+                    const messages = await response.json();
+                    messagesMap[currentChannel] = messages;
+                    if (messages.length > 0) {
+                        lastMessageId = messages[messages.length - 1].id;
+                    }
+                    renderMessages();
+                }
+            } catch (e) {
+                console.error("Error fetching message history:", e);
+                document.getElementById('messageContainer').innerHTML = `
+                    <div class="flex items-center justify-center h-full text-red-400">
+                        <div class="text-center">
+                            <i class="fa-solid fa-triangle-exclamation text-3xl mb-2"></i>
+                            <p>Failed to load message history.</p>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // Fetch Session status
+        async function fetchSessionStatus() {
+            const statusDot = document.getElementById('sessionStatusDot');
+            const infoText = document.getElementById('sessionInfoText');
+            const sessionActions = document.getElementById('sessionActions');
+
+            try {
+                const response = await fetch(`/api/channels/${currentChannel}/session`);
+                if (response.ok) {
+                    activeSession = await response.json();
+                    statusDot.className = "w-2.5 h-2.5 rounded-full bg-discord-online animate-pulse";
+                    const maxTText = activeSession.max_turns ? ` / ${activeSession.max_turns}` : ' (unlimited)';
+                    infoText.innerHTML = `
+                        <div class="text-white font-semibold">Active Session</div>
+                        <div class="text-[11px] text-discord-muted mt-1">ID: <code class="text-[10px]">${activeSession.session_id.substring(0,8)}...</code></div>
+                        <div class="text-[11px] text-discord-muted">Turns: <b class="text-white">${activeSession.turn_count}</b>${maxTText}</div>
+                    `;
+                    sessionActions.innerHTML = `
+                        <button onclick="endSession()" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-2 rounded transition-colors">
+                            End Session
+                        </button>
+                    `;
+                } else {
+                    activeSession = null;
+                    statusDot.className = "w-2.5 h-2.5 rounded-full bg-red-500";
+                    infoText.innerText = "No active session on this channel.";
+                    sessionActions.innerHTML = `
+                        <button onclick="promptStartSession()" class="flex-1 bg-discord-accent hover:bg-discord-accentHover text-white font-semibold py-1 px-2 rounded transition-colors">
+                            Start Session
+                        </button>
+                    `;
+                }
+            } catch (e) {
+                console.error("Error fetching session status:", e);
+            }
+        }
+
+        async function promptStartSession() {
+            const maxTurnsInput = prompt("Enter max turns limit (leave empty or enter 0 for unlimited):", "20");
+            if (maxTurnsInput === null) return;
+            const maxTurns = parseInt(maxTurnsInput) || null;
+
+            try {
+                const response = await fetch(`/api/channels/${currentChannel}/session`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_turns: maxTurns })
+                });
+                if (response.ok) {
+                    fetchSessionStatus();
+                }
+            } catch (e) {
+                alert("Failed to start session: " + e.message);
+            }
+        }
+
+        async function endSession() {
+            if (!confirm("Are you sure you want to end this session?")) return;
+            try {
+                const response = await fetch(`/api/channels/${currentChannel}/session`, {
+                    method: 'DELETE'
+                });
+                if (response.ok) {
+                    fetchSessionStatus();
+                }
+            } catch (e) {
+                alert("Failed to end session: " + e.message);
+            }
+        }
+
+        // Connect Server Sent Events
+        function connectSSE() {
+            if (sseSource) {
+                sseSource.close();
+            }
+
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.className = "flex items-center gap-1.5 text-amber-500 font-medium";
+            statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span><span>Connecting...</span>`;
+
+            // Query Params for SSE presence tracking!
+            const params = new URLSearchParams({
+                since_id: lastMessageId,
+                participant_id: identity.id,
+                display_name: identity.display_name,
+                kind: identity.kind,
+                side: identity.side
+            });
+
+            const sseUrl = `/api/channels/${currentChannel}/stream?${params.toString()}`;
+            sseSource = new EventSource(sseUrl);
+
+            sseSource.onopen = () => {
+                statusEl.className = "flex items-center gap-1.5 text-discord-online font-medium";
+                statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-discord-online animate-ping"></span><span>SSE Live</span>`;
+                // Start presence update loop
+                fetchPresence();
+            };
+
+            sseSource.onerror = (e) => {
+                statusEl.className = "flex items-center gap-1.5 text-red-500 font-medium";
+                statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-red-500"></span><span>Disconnected</span>`;
+                console.error("SSE Connection error:", e);
+                // Attempt to reconnect in 5 seconds
+                setTimeout(connectSSE, 5000);
+            };
+
+            sseSource.addEventListener('ready', (event) => {
+                const data = JSON.parse(event.data);
+                console.log("SSE streaming active from cursor:", data.since_id);
+            });
+
+            sseSource.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                appendLiveMessage(message);
+            };
+        }
+
+        // Fetch Presence
+        async function fetchPresence() {
+            try {
+                const response = await fetch(`/api/channels/${currentChannel}/presence`);
+                if (response.ok) {
+                    onlineParticipants = await response.json();
+                    renderPresence();
+                }
+            } catch (e) {
+                console.error("Error fetching presence:", e);
+            }
+        }
+
+        function renderPresence() {
+            const sideXEl = document.getElementById('presenceSideX');
+            const sideYEl = document.getElementById('presenceSideY');
+            const unassignedEl = document.getElementById('presenceUnassigned');
+
+            const groupX = onlineParticipants.filter(p => p.side === 'X');
+            const groupY = onlineParticipants.filter(p => p.side === 'Y');
+            const groupNone = onlineParticipants.filter(p => p.side !== 'X' && p.side !== 'Y');
+
+            // Update Headers with count
+            sideXEl.previousElementSibling.innerText = `Side X (${groupX.length})`;
+            sideYEl.previousElementSibling.innerText = `Side Y (${groupY.length})`;
+            unassignedEl.previousElementSibling.innerText = `Unassigned (${groupNone.length})`;
+
+            const buildUserHtml = (p) => {
+                const avatarColor = getDeterministicColor(p.id);
+                const roleBadge = p.kind === 'agent' ? '<span class="bg-discord-accent text-[9px] font-bold text-white px-1 py-0.5 rounded leading-none uppercase">Agent</span>' : '';
+                return `
+                    <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-discord-hover cursor-pointer overflow-hidden transition-colors" onclick="selectRecipient('${p.id}')">
+                        <div class="w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs text-white shadow" style="background-color: ${avatarColor}">
+                            ${p.display_name.substring(0,2).toUpperCase()}
+                        </div>
+                        <div class="flex-1 overflow-hidden truncate flex items-center gap-1">
+                            <span class="truncate font-semibold text-white/90 text-sm">${p.display_name}</span>
+                            ${roleBadge}
+                        </div>
+                    </div>
+                `;
+            };
+
+            sideXEl.innerHTML = groupX.length > 0 ? groupX.map(buildUserHtml).join('') : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
+            sideYEl.innerHTML = groupY.length > 0 ? groupY.map(buildUserHtml).join('') : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
+            unassignedEl.innerHTML = groupNone.length > 0 ? groupNone.map(buildUserHtml).join('') : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
+
+            // Dynamically populate Recipient select dropdown incomposer
+            const recipientSelect = document.getElementById('msgRecipient');
+            const currentSelected = recipientSelect.value;
+
+            // Build options
+            let optionsHtml = '<option value="" class="bg-discord-sidebar">any-human</option>';
+            onlineParticipants.forEach(p => {
+                // Don't include ourselves in the recipient select
+                if (p.id !== identity.id) {
+                    const isSelected = p.id === currentSelected ? 'selected' : '';
+                    optionsHtml += `<option value="${p.id}" ${isSelected} class="bg-discord-sidebar">${p.display_name} (${p.kind})</option>`;
+                }
+            });
+            recipientSelect.innerHTML = optionsHtml;
+        }
+
+        function selectRecipient(id) {
+            const recipientSelect = document.getElementById('msgRecipient');
+            recipientSelect.value = id;
+            document.getElementById('msgType').value = "QUESTION";
+            onMsgTypeChange();
+        }
+
+        // Render Message stream
+        function renderMessages() {
+            const container = document.getElementById('messageContainer');
+            const messages = messagesMap[currentChannel] || [];
+
+            if (messages.length === 0) {
+                container.innerHTML = `
+                    <div class="flex flex-col items-center justify-center h-full text-discord-muted text-sm space-y-2">
+                        <i class="fa-solid fa-comments text-4xl text-discord-darkest"></i>
+                        <p>Welcome to <b>#${currentChannel}</b>!</p>
+                        <p class="text-xs text-discord-muted/80">No messages yet. Send a note to kickstart the conversation.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Group sequential messages from the same sender if within 3 minutes
+            let html = '';
+            messages.forEach((msg, idx) => {
+                html += renderSingleMessage(msg);
+            });
+
+            container.innerHTML = html;
+            scrollToBottom();
+        }
+
+        function renderSingleMessage(msg) {
+            // Check if directed to me or any-human (when I am human)
+            const isToMe = msg.recipient === identity.id;
+            const isToAnyHuman = msg.recipient === 'any-human' && identity.side;
+            const isQuestion = msg.type && msg.type.toUpperCase() === 'QUESTION';
+
+            // Background and border styling for directed notifications
+            let containerClasses = "flex items-start gap-4 p-3 rounded group relative hover:bg-discord-hover transition-colors";
+            if (isQuestion && msg.status === 'open') {
+                if (isToMe) {
+                    containerClasses += " bg-amber-500/10 border-l-4 border-amber-500 shadow-md";
+                } else if (isToAnyHuman) {
+                    containerClasses += " bg-indigo-500/10 border-l-4 border-indigo-500";
+                }
+            }
+
+            // Colors for sender
+            const avatarBg = getDeterministicColor(msg.sender);
+            const formattedTime = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            // Render markdown body safely
+            let formattedBody = msg.body;
+            try {
+                formattedBody = marked.parse(msg.body || "");
+            } catch (e) {
+                console.error("Markdown parsing failed", e);
+            }
+
+            // Badges
+            let typeBadge = '';
+            if (msg.type) {
+                const t = msg.type.toUpperCase();
+                let badgeColor = "bg-discord-darkest text-discord-muted";
+                if (t === 'QUESTION') badgeColor = "bg-amber-600 text-white";
+                if (t === 'ANSWER') badgeColor = "bg-emerald-600 text-white";
+                if (t === 'INTERRUPT') badgeColor = "bg-red-600 text-white animate-pulse";
+                if (t === 'DONE') badgeColor = "bg-blue-600 text-white";
+
+                typeBadge = `<span class="${badgeColor} text-[10px] font-extrabold px-1.5 py-0.5 rounded shadow">${t}</span>`;
+            }
+
+            let sideBadge = '';
+            if (msg.side) {
+                const sideColor = msg.side === 'X' ? 'border-emerald-500 text-emerald-400' : 'border-blue-500 text-blue-400';
+                sideBadge = `<span class="border ${sideColor} text-[9px] font-semibold px-1 rounded">Side ${msg.side}</span>`;
+            }
+
+            let recipientBadge = '';
+            if (msg.recipient) {
+                recipientBadge = `<span class="text-[10px] bg-discord-darkest text-pink-400 font-bold px-1.5 py-0.5 rounded"><i class="fa-solid fa-at mr-0.5"></i>${msg.recipient}</span>`;
+            }
+
+            let qStatusBadge = '';
+            if (isQuestion) {
+                const isOpened = msg.status === 'open';
+                const sColor = isOpened ? 'bg-orange-500 text-white animate-pulse' : 'bg-discord-sidebar text-discord-muted';
+                qStatusBadge = `<span class="${sColor} text-[9px] font-bold px-1 rounded ml-1">${isOpened ? 'OPEN' : 'ANSWERED'}</span>`;
+            }
+
+            // Quick Actions Panel (Answer, Reply)
+            let actionsHtml = '';
+            if (isQuestion && msg.status === 'open' && (isToMe || isToAnyHuman)) {
+                actionsHtml += `
+                    <button onclick="initiateAnswer(${msg.id}, '${msg.sender}', '${msg.body.replace(/'/g, "\\'")}')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-1 px-2.5 rounded shadow-sm flex items-center gap-1 transition-colors">
+                        <i class="fa-solid fa-reply-all"></i> Answer Question
+                    </button>
+                `;
+            }
+            actionsHtml += `
+                <button onclick="replyTo(${msg.id}, '${msg.sender}', '${msg.body.replace(/'/g, "\\'")}')" class="text-discord-muted hover:text-white transition-colors bg-discord-sidebar p-1 px-2 rounded text-xs flex items-center gap-1" title="Reply">
+                    <i class="fa-solid fa-reply"></i> Reply
+                </button>
+            `;
+
+            // Visual link for thread reply
+            let threadHeaderHtml = '';
+            if (msg.reply_to) {
+                threadHeaderHtml = `
+                    <div class="flex items-center gap-1 text-[11px] text-discord-muted mb-1 pl-1 select-none">
+                        <i class="fa-solid fa-angles-right text-discord-accent text-[9px]"></i>
+                        <span>Replying to message <a href="#msg-${msg.reply_to}" class="font-semibold hover:underline text-discord-accent">#${msg.reply_to}</a></span>
+                    </div>
+                `;
+            }
+
+            return `
+                <div id="msg-${msg.id}" class="message-wrapper">
+                    ${threadHeaderHtml}
+                    <div class="${containerClasses}">
+                        <!-- Avatar -->
+                        <div class="w-10 h-10 rounded-full flex items-center justify-center font-bold text-white shadow select-none" style="background-color: ${avatarBg}">
+                            ${msg.sender.substring(0, 2).toUpperCase()}
+                        </div>
+
+                        <!-- Core Body -->
+                        <div class="flex-1 overflow-hidden min-w-0">
+                            <!-- Header Row -->
+                            <div class="flex flex-wrap items-center gap-2 mb-1">
+                                <span class="font-bold text-white text-sm hover:underline cursor-pointer">${msg.sender}</span>
+                                ${sideBadge}
+                                ${typeBadge}
+                                ${recipientBadge}
+                                ${qStatusBadge}
+                                <span class="text-xs text-discord-muted">${formattedTime}</span>
+                            </div>
+                            <!-- Text/Markdown Content -->
+                            <div class="text-sm leading-relaxed text-discord-text prose prose-invert max-w-none prose-sm">
+                                ${formattedBody}
+                            </div>
+                        </div>
+
+                        <!-- Actions Hover Trigger -->
+                        <div class="absolute right-4 top-2 hidden group-hover:flex items-center gap-2 bg-[#35373c] p-1 rounded-md shadow-lg border border-discord-darkest select-none z-10">
+                            ${actionsHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Live append messages from SSE
+        function appendLiveMessage(msg) {
+            const messages = messagesMap[currentChannel] || [];
+
+            // Prevent duplication
+            if (messages.some(m => m.id === msg.id)) {
+                return;
+            }
+
+            messages.push(msg);
+            messagesMap[currentChannel] = messages;
+
+            // Record last seen message ID cursor
+            lastMessageId = msg.id;
+
+            const container = document.getElementById('messageContainer');
+
+            // Remove spinner or empty chat graphics if present
+            if (messages.length === 1) {
+                container.innerHTML = '';
+            }
+
+            const msgHtml = renderSingleMessage(msg);
+            container.insertAdjacentHTML('beforeend', msgHtml);
+
+            // Re-render presence or refresh channels state dynamically
+            fetchPresence();
+            fetchSessionStatus();
+            fetchChannels();
+
+            // Auto Scroll
+            scrollToBottom({ force: false });
+        }
+
+        function scrollToBottom(opts = {}) {
+            const container = document.getElementById('messageContainer');
+            if (opts.force) {
+                container.scrollTop = container.scrollHeight;
+            } else {
+                // If user is scrolled up, don't force autoscroll
+                const threshold = 150; // pixels
+                const isNearBottom = container.scrollHeight - container.clientHeight - container.scrollTop < threshold;
+                if (isNearBottom) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            }
+        }
+
+        // Reply / Thread actions
+        function replyTo(id, sender, body) {
+            replyTarget = { id, sender, body };
+            document.getElementById('replyTargetSender').innerText = sender;
+
+            // Short snippet
+            const cleanBody = body.substring(0, 60) + (body.length > 60 ? '...' : '');
+            document.getElementById('replyTargetSnippet').innerText = cleanBody;
+
+            document.getElementById('replyTargetBanner').classList.remove('hidden');
+
+            // Autofocus input
+            document.getElementById('composerInput').focus();
+        }
+
+        function initiateAnswer(id, sender, body) {
+            // Choose ANSWER message type
+            document.getElementById('msgType').value = 'ANSWER';
+            onMsgTypeChange();
+
+            // Target recipient is original question sender
+            const recipientSelect = document.getElementById('msgRecipient');
+            recipientSelect.value = sender;
+
+            // Trigger reply target setting
+            replyTo(id, sender, body);
+        }
+
+        function cancelReply() {
+            replyTarget = null;
+            document.getElementById('replyTargetBanner').classList.add('hidden');
+        }
+
+        function onMsgTypeChange() {
+            const type = document.getElementById('msgType').value;
+            const recipientSelector = document.getElementById('recipientSelector');
+
+            if (type === 'QUESTION' || type === 'ANSWER') {
+                recipientSelector.classList.remove('hidden');
+            } else {
+                recipientSelector.classList.add('hidden');
+            }
+        }
+
+        // Submit message
+        async function sendMessage() {
+            const input = document.getElementById('composerInput');
+            const body = input.value.trim();
+            if (!body) return;
+
+            const type = document.getElementById('msgType').value;
+            const side = document.getElementById('msgSide').value || null;
+            const recipient = (type === 'QUESTION' || type === 'ANSWER') ? document.getElementById('msgRecipient').value || 'any-human' : null;
+            const replyToId = replyTarget ? replyTarget.id : null;
+
+            // Clear input immediately to feel snappy
+            input.value = '';
+            input.style.height = 'auto';
+
+            try {
+                const response = await fetch(`/api/channels/${currentChannel}/messages`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sender: identity.id,
+                        type: type,
+                        body: body,
+                        side: side,
+                        recipient: recipient,
+                        reply_to: replyToId
+                    })
+                });
+
+                if (response.ok) {
+                    // Success! Cancel any active reply target
+                    cancelReply();
+
+                    // Reset type select to default NOTE
+                    document.getElementById('msgType').value = 'NOTE';
+                    onMsgTypeChange();
+                } else {
+                    const err = await response.json();
+                    alert("Error posting message: " + (err.error || response.statusText));
+                }
+            } catch (e) {
+                console.error("Error submitting message:", e);
+                alert("Failed to send message: Network error.");
+            }
+        }
+
+        function handleComposerKey(event) {
+            // Enter sends message, Shift+Enter inputs a newline
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+
+        // Initialize App on load
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Load identity first
+            loadIdentity();
+
+            // Set message type visibility
+            onMsgTypeChange();
+
+            // Fetch list of channels and open the first one (or default)
+            await fetchChannels();
+
+            // Initially join default channel or the first in list
+            const channelListEl = document.getElementById('channelList');
+            const firstChDiv = channelListEl.querySelector('[onclick]');
+            if (firstChDiv) {
+                // Parse channel name from onclick attribute
+                const match = firstChDiv.getAttribute('onclick').match(/'([^']+)'/);
+                if (match) {
+                    selectChannel(match[1]);
+                    return;
+                }
+            }
+            // Fallback
+            selectChannel('general');
+        });
+
+        // Periodic state updates (every 5 seconds)
+        setInterval(() => {
+            fetchChannels();
+            fetchPresence();
+            fetchSessionStatus();
+        }, 5000);
+
+    </script>
+</body>
+</html>

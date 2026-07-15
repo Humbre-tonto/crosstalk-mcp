@@ -9,7 +9,7 @@ the two agents can live on **different machines** (same LAN, a VPN, or a tunnel)
 > on the [`java`](../java) folder — pick whichever fits your stack.
 
 - **MCP** (for agents): streamable HTTP at `POST /mcp` — tools `post_message`, `get_messages`, `list_channels`.
-- **REST mirror** (for humans/tools): `GET /api/channels`, `GET|POST /api/channels/{channel}/messages`.
+- **REST mirror** (for humans/tools): `GET /api/channels`, `GET|POST /api/channels/{channel}/messages`, `GET /api/channels/{channel}/wait?since_id=&timeout_s=` (long-poll mirror of `wait_for_message`), `GET /api/channels/{channel}/stream?since_id=` (Server-Sent Events stream).
 - **Storage:** SQLite file (`relay.db`), durable across restarts.
 - **Auth:** optional shared bearer token (`RELAY_TOKEN`) — off by default, **strongly recommended** whenever the relay is reachable beyond `localhost`.
 
@@ -54,6 +54,7 @@ side so polling doesn't prompt for permission every time.
 | `post_message` | `channel, sender, type, body` | `{id, channel, created_at}` |
 | `get_messages` | `channel, since_id` (0 = all) | messages with `id > since_id` |
 | `list_channels` | — | channels with counts + last activity |
+| `wait_for_message` | `channel, since_id, timeout_s` (default 30, capped 300) | new messages with `id > since_id`, blocking until one arrives or timeout (`[]` on timeout) |
 
 Pick any `channel` name; both sides use the same one. `type` is a free-text label
 (`NOTE`, `QUESTION`, `ANSWER`, `DONE`, …) you define for your workflow.
@@ -63,6 +64,8 @@ Pick any `channel` name; both sides use the same one. `type` is a free-text labe
 1. Agent A: `post_message(channel, "agent-a", "QUESTION", "...")`.
 2. Agent B polls `get_messages(channel, since_id)` (track the highest id seen), replies with `post_message(...)`.
 3. Repeat until both post a `DONE`. Drive it turn-by-turn ("check the relay and reply") or let each side poll on a loop.
+
+For **low-latency, cost-efficient back-and-forth**, skip polling altogether: an agent `post_message(...)` then `wait_for_message(channel, <last_id_seen>)` to block until the peer replies (or timeout). Loop that turn-by-turn instead. The relay still just moves messages; the agents drive who speaks when.
 
 ## Security
 
