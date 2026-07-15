@@ -57,11 +57,20 @@ def _register_agent_presence(channel: str, sender: str) -> None:
             return
     if channel not in _online_participants:
         _online_participants[channel] = {}
+
+    sender_lower = sender.lower()
+    if sender_lower.endswith("x") or "-a" in sender_lower or "agent-a" in sender_lower:
+        side = "X"
+    elif sender_lower.endswith("y") or "-b" in sender_lower or "agent-b" in sender_lower:
+        side = "Y"
+    else:
+        side = "X" if any(char in sender_lower for char in ["x", "a"]) else "Y"
+
     _online_participants[channel][sender] = {
         "id": sender,
         "display_name": sender,
         "kind": "agent",
-        "side": "X" if any(x in sender.lower() for x in ["x", "a", "creator"]) else "Y",
+        "side": side,
         "last_seen": time.time()
     }
 
@@ -72,7 +81,7 @@ def _prune_old_participants(channel: str) -> None:
     now = time.time()
     to_remove = []
     for pid, p in list(_online_participants[channel].items()):
-        if p.get("kind") == "agent" and now - p.get("last_seen", 0) > 60.0:
+        if now - p.get("last_seen", 0) > 60.0:
             to_remove.append(pid)
     for pid in to_remove:
         _online_participants[channel].pop(pid, None)
@@ -186,16 +195,14 @@ def _post(
     if type_.upper() == "QUESTION" and not status:
         status = "open"
 
-    # If this is an answer replying to a question, update the question's status to "answered"
-    if type_.upper() == "ANSWER" and reply_to:
-        with _write_lock, _conn() as c:
+    with _write_lock, _conn() as c:
+        # If this is an answer replying to a question, update the question's status to "answered"
+        if type_.upper() == "ANSWER" and reply_to:
             c.execute(
                 "UPDATE messages SET status='answered' WHERE id=? AND type='QUESTION'",
                 (reply_to,),
             )
-            c.commit()
 
-    with _write_lock, _conn() as c:
         cur = c.execute(
             "INSERT INTO messages(channel,sender,type,body,created_at,session_id,recipient,reply_to,status,side) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -434,6 +441,11 @@ async def rest_stream(request: Request) -> StreamingResponse:
             while True:
                 if await request.is_disconnected():
                     break
+
+                # Keep-alive/heartbeat: update the participant's last_seen
+                if pid and channel in _online_participants and pid in _online_participants[channel]:
+                    _online_participants[channel][pid]["last_seen"] = time.time()
+
                 try:
                     msgs = await asyncio.to_thread(_get, channel, cursor)
                 except Exception:
@@ -489,11 +501,37 @@ class _BearerTokenMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http":
+            path = scope.get("path", "")
+            # Exempt UI routes from the bearer token gate so the browser can load /ui first
+            if path in ["/", "/ui"]:
+                await self.app(scope, receive, send)
+                return
+
             headers = dict(scope.get("headers") or [])
             auth = headers.get(b"authorization", b"").decode()
-            if auth != f"Bearer {self.token}":
+
+            import hmac
+            token_matched = False
+
+            # 1. Check Bearer Authorization header using constant-time comparison
+            if auth.startswith("Bearer "):
+                provided_token = auth[7:]
+                if hmac.compare_digest(provided_token, self.token):
+                    token_matched = True
+
+            # 2. Check query parameters (necessary for EventSource SSE stream connections)
+            if not token_matched:
+                query_string = scope.get("query_string", b"").decode()
+                import urllib.parse
+                params = urllib.parse.parse_qs(query_string)
+                q_token = params.get("token", params.get("relay_token", [None]))[0]
+                if q_token and hmac.compare_digest(q_token, self.token):
+                    token_matched = True
+
+            if not token_matched:
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
+
         await self.app(scope, receive, send)
 
 

@@ -70,9 +70,14 @@
 </head>
 <body class="bg-discord-darkest text-discord-text h-screen flex flex-col overflow-hidden font-sans">
 
-    <!-- Top Connection / Auth Banner if needed (optional) -->
-    <div id="authBanner" class="bg-amber-600 text-white text-xs px-4 py-1 flex justify-between items-center hidden">
-        <span><i class="fa-solid fa-triangle-exclamation mr-1"></i> Running with token authentication. Authenticated!</span>
+    <!-- Native CSS Offline Warning Banner (rendered even if Tailwind CDN is offline) -->
+    <div id="offlineCdnBanner" style="display:none; background-color:#ef4444; color:#ffffff; font-family:sans-serif; font-size:13px; font-weight:bold; padding:8px 16px; text-align:center; z-index:10000; position:relative; box-shadow:0 2px 4px rgba(0,0,0,0.2);">
+        ⚠️ WARNING: External CDNs (Tailwind CSS or Marked) failed to load. The UI requires internet access to render style/markdown, or these assets must be vendored for offline/air-gapped networks.
+    </div>
+
+    <!-- Dynamic Auth Banner -->
+    <div id="authBanner" class="bg-red-600 text-white text-xs px-4 py-2 flex justify-between items-center hidden">
+        <span><i class="fa-solid fa-lock mr-1.5"></i> <span id="authBannerText">Authentication token required. Configure it in settings.</span></span>
     </div>
 
     <div class="flex-1 flex overflow-hidden">
@@ -285,6 +290,11 @@
                         <option value="">None (Spectator)</option>
                     </select>
                 </div>
+                <div class="space-y-1.5">
+                    <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Relay Token (Optional)</label>
+                    <input type="password" id="modalToken" placeholder="Enter RELAY_TOKEN if configured"
+                        class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
+                </div>
                 <div class="space-y-1 bg-discord-darkest/50 p-3 rounded text-xs text-discord-muted border border-discord-darkest">
                     <p class="font-semibold text-discord-text mb-1"><i class="fa-solid fa-info-circle text-discord-accent mr-1"></i>How does identity work?</p>
                     <p>To ask/answer questions and post interrupts directed at you, the system needs to recognize your ID. Selecting a side ensures messages are colored correctly.</p>
@@ -308,6 +318,41 @@
         let sseSource = null;
         let lastMessageId = 0;
         let replyTarget = null; // { id, sender, body }
+
+        // Fetch wrapper for optional RELAY_TOKEN support & 401 handling
+        async function customFetch(url, options = {}) {
+            if (!options.headers) {
+                options.headers = {};
+            }
+            const token = localStorage.getItem('crosstalk_token');
+            if (token) {
+                options.headers['Authorization'] = `Bearer ${token}`;
+            }
+
+            try {
+                const response = await fetch(url, options);
+                if (response.status === 401) {
+                    showAuthWarning(true, "Unauthorized! Please configure a valid Relay Token in settings (gear icon at bottom-left).");
+                } else if (response.ok) {
+                    showAuthWarning(false);
+                }
+                return response;
+            } catch (e) {
+                console.error("Network error during customFetch:", e);
+                throw e;
+            }
+        }
+
+        function showAuthWarning(show, message = "") {
+            const banner = document.getElementById('authBanner');
+            const bannerText = document.getElementById('authBannerText');
+            if (show) {
+                bannerText.innerText = message;
+                banner.classList.remove('hidden');
+            } else {
+                banner.classList.add('hidden');
+            }
+        }
 
         // Load Identity from LocalStorage
         function loadIdentity() {
@@ -344,6 +389,7 @@
             document.getElementById('modalPartId').value = identity.id;
             document.getElementById('modalDispName').value = identity.display_name;
             document.getElementById('modalSide').value = identity.side || "";
+            document.getElementById('modalToken').value = localStorage.getItem('crosstalk_token') || "";
 
             const cancelBtn = document.getElementById('modalCancelBtn');
             const closeBtn = document.getElementById('closeIdentityModalBtn');
@@ -366,6 +412,7 @@
             const pid = document.getElementById('modalPartId').value.trim().replace(/\s+/g, '');
             const disp = document.getElementById('modalDispName').value.trim();
             const side = document.getElementById('modalSide').value;
+            const token = document.getElementById('modalToken').value.trim();
 
             if (!pid || !disp) {
                 alert("Participant ID and Display Name are required!");
@@ -374,6 +421,12 @@
 
             identity = { id: pid, display_name: disp, kind: 'human', side: side };
             localStorage.setItem('crosstalk_identity', JSON.stringify(identity));
+
+            if (token) {
+                localStorage.setItem('crosstalk_token', token);
+            } else {
+                localStorage.removeItem('crosstalk_token');
+            }
 
             updateIdentityUI();
             closeIdentityModal();
@@ -402,8 +455,8 @@
         // Fetch Channels
         async function fetchChannels() {
             try {
-                const response = await fetch('/api/channels');
-                if (response.ok) {
+                const response = await customFetch('/api/channels');
+                if (response && response.ok) {
                     const channels = await response.json();
                     renderChannels(channels);
                 }
@@ -491,8 +544,8 @@
         // Fetch History
         async function fetchHistory() {
             try {
-                const response = await fetch(`/api/channels/${currentChannel}/messages`);
-                if (response.ok) {
+                const response = await customFetch(`/api/channels/${currentChannel}/messages`);
+                if (response && response.ok) {
                     const messages = await response.json();
                     messagesMap[currentChannel] = messages;
                     if (messages.length > 0) {
@@ -520,8 +573,8 @@
             const sessionActions = document.getElementById('sessionActions');
 
             try {
-                const response = await fetch(`/api/channels/${currentChannel}/session`);
-                if (response.ok) {
+                const response = await customFetch(`/api/channels/${currentChannel}/session`);
+                if (response && response.ok) {
                     activeSession = await response.json();
                     statusDot.className = "w-2.5 h-2.5 rounded-full bg-discord-online animate-pulse";
                     const maxTText = activeSession.max_turns ? ` / ${activeSession.max_turns}` : ' (unlimited)';
@@ -556,12 +609,12 @@
             const maxTurns = parseInt(maxTurnsInput) || null;
 
             try {
-                const response = await fetch(`/api/channels/${currentChannel}/session`, {
+                const response = await customFetch(`/api/channels/${currentChannel}/session`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ max_turns: maxTurns })
                 });
-                if (response.ok) {
+                if (response && response.ok) {
                     fetchSessionStatus();
                 }
             } catch (e) {
@@ -572,10 +625,10 @@
         async function endSession() {
             if (!confirm("Are you sure you want to end this session?")) return;
             try {
-                const response = await fetch(`/api/channels/${currentChannel}/session`, {
+                const response = await customFetch(`/api/channels/${currentChannel}/session`, {
                     method: 'DELETE'
                 });
-                if (response.ok) {
+                if (response && response.ok) {
                     fetchSessionStatus();
                 }
             } catch (e) {
@@ -602,12 +655,20 @@
                 side: identity.side
             });
 
+            // Append optional token query parameter for authenticated environments!
+            const token = localStorage.getItem('crosstalk_token');
+            if (token) {
+                params.append('token', token);
+            }
+
             const sseUrl = `/api/channels/${currentChannel}/stream?${params.toString()}`;
             sseSource = new EventSource(sseUrl);
 
             sseSource.onopen = () => {
                 statusEl.className = "flex items-center gap-1.5 text-discord-online font-medium";
                 statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-discord-online animate-ping"></span><span>SSE Live</span>`;
+                // Clear any authorization banner warnings since we connected successfully!
+                showAuthWarning(false);
                 // Start presence update loop
                 fetchPresence();
             };
@@ -616,6 +677,12 @@
                 statusEl.className = "flex items-center gap-1.5 text-red-500 font-medium";
                 statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-red-500"></span><span>Disconnected</span>`;
                 console.error("SSE Connection error:", e);
+
+                // If token exists, maybe it is incorrect
+                if (token) {
+                    showAuthWarning(true, "SSE Connection failed. Please check if your Relay Token configured in settings is valid.");
+                }
+
                 // Attempt to reconnect in 5 seconds
                 setTimeout(connectSSE, 5000);
             };
@@ -634,8 +701,8 @@
         // Fetch Presence
         async function fetchPresence() {
             try {
-                const response = await fetch(`/api/channels/${currentChannel}/presence`);
-                if (response.ok) {
+                const response = await customFetch(`/api/channels/${currentChannel}/presence`);
+                if (response && response.ok) {
                     onlineParticipants = await response.json();
                     renderPresence();
                 }
@@ -747,10 +814,15 @@
             const avatarBg = getDeterministicColor(msg.sender);
             const formattedTime = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-            // Render markdown body safely
+            // Render markdown body safely, with offline detection fallback
             let formattedBody = msg.body;
             try {
-                formattedBody = marked.parse(msg.body || "");
+                if (typeof marked !== 'undefined') {
+                    formattedBody = marked.parse(msg.body || "");
+                } else {
+                    // Raw text rendering fallback if Marked CDN failed to load
+                    formattedBody = `<p style="white-space: pre-wrap;">${msg.body || ""}</p>`;
+                }
             } catch (e) {
                 console.error("Markdown parsing failed", e);
             }
@@ -910,19 +982,6 @@
             document.getElementById('composerInput').focus();
         }
 
-        function initiateAnswer(id, sender, body) {
-            // Choose ANSWER message type
-            document.getElementById('msgType').value = 'ANSWER';
-            onMsgTypeChange();
-
-            // Target recipient is original question sender
-            const recipientSelect = document.getElementById('msgRecipient');
-            recipientSelect.value = sender;
-
-            // Trigger reply target setting
-            replyTo(id, sender, body);
-        }
-
         function cancelReply() {
             replyTarget = null;
             document.getElementById('replyTargetBanner').classList.add('hidden');
@@ -955,7 +1014,7 @@
             input.style.height = 'auto';
 
             try {
-                const response = await fetch(`/api/channels/${currentChannel}/messages`, {
+                const response = await customFetch(`/api/channels/${currentChannel}/messages`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -968,14 +1027,14 @@
                     })
                 });
 
-                if (response.ok) {
+                if (response && response.ok) {
                     // Success! Cancel any active reply target
                     cancelReply();
 
                     // Reset type select to default NOTE
                     document.getElementById('msgType').value = 'NOTE';
                     onMsgTypeChange();
-                } else {
+                } else if (response) {
                     const err = await response.json();
                     alert("Error posting message: " + (err.error || response.statusText));
                 }
@@ -995,6 +1054,13 @@
 
         // Initialize App on load
         window.addEventListener('DOMContentLoaded', async () => {
+            // Check if external CDNs loaded correctly (offline detection)
+            const tailwindLoaded = typeof tailwind !== 'undefined';
+            const markedLoaded = typeof marked !== 'undefined';
+            if (!tailwindLoaded || !markedLoaded) {
+                document.getElementById('offlineCdnBanner').style.display = 'block';
+            }
+
             // Load identity first
             loadIdentity();
 
