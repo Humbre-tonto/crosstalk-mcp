@@ -319,6 +319,34 @@
         let lastMessageId = 0;
         let replyTarget = null; // { id, sender, body }
 
+        // Track last read message counts for each channel to compute unread badges
+        let lastReadCountMap = {};
+        try {
+            const storedCount = localStorage.getItem('crosstalk_last_read_count');
+            if (storedCount) {
+                lastReadCountMap = JSON.parse(storedCount);
+            }
+        } catch (e) {
+            console.error("Failed to parse lastReadCountMap", e);
+        }
+
+        function saveLastReadCount() {
+            localStorage.setItem('crosstalk_last_read_count', JSON.stringify(lastReadCountMap));
+        }
+
+        let lastFetchedChannels = [];
+        let unansweredQuestions = new Set();
+        let isWindowFocused = true;
+
+        window.addEventListener('focus', () => {
+            isWindowFocused = true;
+            updateTabTitle();
+        });
+        window.addEventListener('blur', () => {
+            isWindowFocused = false;
+            updateTabTitle();
+        });
+
         // Fetch wrapper for optional RELAY_TOKEN support & 401 handling
         async function customFetch(url, options = {}) {
             if (!options.headers) {
@@ -431,6 +459,13 @@
             updateIdentityUI();
             closeIdentityModal();
 
+            // Request Notification permission if supported and not already granted/denied (user gesture context)
+            if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+                Notification.requestPermission().then(permission => {
+                    console.log("Notification permission state:", permission);
+                });
+            }
+
             // Re-establish SSE connection to announce new presence!
             connectSSE();
         }
@@ -458,6 +493,7 @@
                 const response = await customFetch('/api/channels');
                 if (response && response.ok) {
                     const channels = await response.json();
+                    lastFetchedChannels = channels;
                     renderChannels(channels);
                 }
             } catch (e) {
@@ -479,22 +515,229 @@
                 return;
             }
 
+            // Initialize lastReadCountMap for channels we haven't seen yet
+            channels.forEach(ch => {
+                if (lastReadCountMap[ch.channel] === undefined) {
+                    lastReadCountMap[ch.channel] = ch.count || 0;
+                }
+            });
+
+            // For the active channel, always sync lastReadCountMap with the current count
+            const activeCh = channels.find(ch => ch.channel === currentChannel);
+            if (activeCh) {
+                lastReadCountMap[currentChannel] = activeCh.count || 0;
+            }
+            saveLastReadCount();
+
+            // Render channels with unread counts
             channelListEl.innerHTML = channels.map(ch => {
                 const isActive = ch.channel === currentChannel;
                 const activeClass = isActive ? 'bg-discord-hover text-white font-semibold' : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text';
 
+                const lastReadCount = lastReadCountMap[ch.channel] || 0;
+                const unreadCount = isActive ? 0 : Math.max(0, ch.count - lastReadCount);
+
+                let badgeHtml = '';
+                if (unreadCount > 0) {
+                    badgeHtml = `
+                        <span class="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full select-none ml-1 animate-pulse" title="${unreadCount} unread messages">
+                            ${unreadCount}
+                        </span>
+                    `;
+                }
+
                 return `
                     <div onclick="selectChannel('${ch.channel}')" class="flex items-center justify-between px-2 py-1.5 rounded cursor-pointer transition-colors ${activeClass}">
                         <span class="flex items-center gap-2 overflow-hidden truncate">
-                            <i class="fa-solid fa-hashtag text-discord-muted"></i>
-                            <span class="truncate">${ch.channel}</span>
+                            <i class="fa-solid fa-hashtag ${unreadCount > 0 ? 'text-red-400' : 'text-discord-muted'}"></i>
+                            <span class="truncate ${unreadCount > 0 ? 'text-white font-semibold' : ''}">${ch.channel}</span>
                         </span>
-                        <span class="bg-discord-darkest text-discord-muted text-[10px] font-bold px-1.5 py-0.5 rounded-full select-none" title="Total messages">
-                            ${ch.count}
-                        </span>
+                        <div class="flex items-center gap-1">
+                            ${badgeHtml}
+                            <span class="bg-discord-darkest text-discord-muted text-[10px] font-bold px-1.5 py-0.5 rounded-full select-none" title="Total messages">
+                                ${ch.count}
+                            </span>
+                        </div>
                     </div>
                 `;
             }).join('');
+
+            // Update page title unread and bell badges if needed (handled in Title indicator step)
+            updateTabTitle(channels);
+        }
+
+        function checkUnansweredQuestions() {
+            unansweredQuestions.clear();
+
+            // Collect all open questions addressed to me or any-human (if I have a side)
+            for (const channel in messagesMap) {
+                const msgs = messagesMap[channel] || [];
+                msgs.forEach(msg => {
+                    const isQuestion = msg.type && msg.type.toUpperCase() === 'QUESTION';
+                    const isOpen = msg.status === 'open';
+                    const isToMe = msg.recipient === identity.id;
+                    const isToAnyHuman = msg.recipient === 'any-human' && identity.side;
+
+                    if (isQuestion && isOpen && (isToMe || isToAnyHuman)) {
+                        unansweredQuestions.add(msg.id);
+                    }
+                });
+            }
+
+            // Remove questions that have answers in any of the loaded messages
+            for (const channel in messagesMap) {
+                const msgs = messagesMap[channel] || [];
+                msgs.forEach(msg => {
+                    if (msg.type && msg.type.toUpperCase() === 'ANSWER' && msg.reply_to) {
+                        unansweredQuestions.delete(msg.reply_to);
+                    }
+                });
+            }
+        }
+
+        function updateTabTitle(channelsList = null) {
+            const baseTitle = "Crosstalk MCP Relay";
+            if (isWindowFocused) {
+                document.title = baseTitle;
+                return;
+            }
+
+            const activeList = channelsList || lastFetchedChannels || [];
+
+            // Calculate total unread across non-focused channels
+            let totalUnread = 0;
+            activeList.forEach(ch => {
+                if (ch.channel !== currentChannel) {
+                    const lastReadCount = lastReadCountMap[ch.channel] || 0;
+                    const unreadCount = Math.max(0, ch.count - lastReadCount);
+                    totalUnread += unreadCount;
+                }
+            });
+
+            checkUnansweredQuestions();
+            const hasBell = unansweredQuestions.size > 0;
+
+            let prefix = "";
+            if (hasBell && totalUnread > 0) {
+                prefix = `(🔔 ${totalUnread}) `;
+            } else if (hasBell) {
+                prefix = `(🔔) `;
+            } else if (totalUnread > 0) {
+                prefix = `(${totalUnread}) `;
+            }
+
+            document.title = prefix + baseTitle;
+        }
+
+        function getToastContainer() {
+            let container = document.getElementById('toastContainer');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'toastContainer';
+                container.className = 'fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none';
+                document.body.appendChild(container);
+            }
+            return container;
+        }
+
+        function showToast(title, body, onClickAction) {
+            const container = getToastContainer();
+            const toast = document.createElement('div');
+            toast.className = 'bg-discord-sidebar border border-amber-500 rounded-lg p-4 shadow-2xl flex flex-col gap-1.5 transition-all duration-300 transform translate-y-2 opacity-0 pointer-events-auto cursor-pointer hover:border-amber-400 select-none';
+
+            toast.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <span class="font-bold text-amber-500 text-sm flex items-center gap-1.5">
+                        <i class="fa-solid fa-bell text-xs animate-bounce"></i>
+                        ${title}
+                    </span>
+                    <button class="text-discord-muted hover:text-white transition-colors" onclick="event.stopPropagation(); this.closest('.message-toast').remove();">
+                        <i class="fa-solid fa-xmark text-xs"></i>
+                    </button>
+                </div>
+                <div class="text-xs text-discord-text line-clamp-3">
+                    ${body}
+                </div>
+                <div class="text-[10px] text-discord-muted font-semibold mt-1 flex justify-end gap-1.5">
+                    <span>Click to view/answer</span>
+                </div>
+            `;
+
+            toast.classList.add('message-toast');
+
+            toast.onclick = () => {
+                if (onClickAction) onClickAction();
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            };
+
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.classList.remove('opacity-0', 'translate-y-2');
+            }, 10);
+
+            setTimeout(() => {
+                if (toast.parentNode) {
+                    toast.classList.add('opacity-0', 'translate-y-2');
+                    setTimeout(() => toast.remove(), 300);
+                }
+            }, 8000);
+        }
+
+        function jumpToMessage(channelName, msgId) {
+            if (currentChannel !== channelName) {
+                selectChannel(channelName).then(() => {
+                    setTimeout(() => {
+                        const el = document.getElementById(`msg-${msgId}`);
+                        if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            el.classList.add('ring-2', 'ring-amber-500', 'ring-offset-2', 'ring-offset-discord-chat');
+                            setTimeout(() => {
+                                el.classList.remove('ring-2', 'ring-amber-500', 'ring-offset-2', 'ring-offset-discord-chat');
+                            }, 3000);
+                        }
+                    }, 500);
+                });
+            } else {
+                const el = document.getElementById(`msg-${msgId}`);
+                if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    el.classList.add('ring-2', 'ring-amber-500', 'ring-offset-2', 'ring-offset-discord-chat');
+                    setTimeout(() => {
+                        el.classList.remove('ring-2', 'ring-amber-500', 'ring-offset-2', 'ring-offset-discord-chat');
+                    }, 3000);
+                }
+            }
+        }
+
+        function handleDirectedQuestionNotification(msg) {
+            if (msg.sender === identity.id) {
+                return;
+            }
+
+            const isQuestion = msg.type && msg.type.toUpperCase() === 'QUESTION';
+            const isToMe = msg.recipient === identity.id;
+            const isToAnyHuman = msg.recipient === 'any-human' && identity.side;
+
+            if (isQuestion && (isToMe || isToAnyHuman)) {
+                const title = `Question from ${msg.sender} in #${msg.channel}`;
+                const body = msg.body;
+
+                showToast(title, body, () => {
+                    jumpToMessage(msg.channel, msg.id);
+                });
+
+                if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                    const browserNotif = new Notification(title, {
+                        body: body
+                    });
+                    browserNotif.onclick = () => {
+                        window.focus();
+                        jumpToMessage(msg.channel, msg.id);
+                    };
+                }
+            }
         }
 
         function promptCreateChannel() {
@@ -934,6 +1177,23 @@
             // Record last seen message ID cursor
             lastMessageId = msg.id;
 
+            // If the message is an ANSWER replying to a question, flip the question's status to answered
+            if (msg.type && msg.type.toUpperCase() === 'ANSWER' && msg.reply_to) {
+                for (const channel in messagesMap) {
+                    const msgs = messagesMap[channel] || [];
+                    const qMsg = msgs.find(m => m.id === msg.reply_to);
+                    if (qMsg) {
+                        qMsg.status = 'answered';
+                    }
+                }
+            }
+
+            // Increment lastReadCountMap for the active channel since we just received it
+            if (lastReadCountMap[currentChannel] !== undefined) {
+                lastReadCountMap[currentChannel]++;
+                saveLastReadCount();
+            }
+
             const container = document.getElementById('messageContainer');
 
             // Remove spinner or empty chat graphics if present
@@ -941,13 +1201,21 @@
                 container.innerHTML = '';
             }
 
-            const msgHtml = renderSingleMessage(msg);
-            container.insertAdjacentHTML('beforeend', msgHtml);
+            // Re-render messages if we flipped a question status, otherwise just append and scroll
+            if (msg.type && msg.type.toUpperCase() === 'ANSWER' && msg.reply_to) {
+                renderMessages();
+            } else {
+                const msgHtml = renderSingleMessage(msg);
+                container.insertAdjacentHTML('beforeend', msgHtml);
+            }
 
             // Re-render presence or refresh channels state dynamically
             fetchPresence();
             fetchSessionStatus();
             fetchChannels();
+
+            // Handle directed notifications/toasts
+            handleDirectedQuestionNotification(msg);
 
             // Auto Scroll
             scrollToBottom({ force: false });
@@ -980,6 +1248,33 @@
 
             // Autofocus input
             document.getElementById('composerInput').focus();
+        }
+
+        function initiateAnswer(id, sender, body) {
+            // Set message type to ANSWER
+            document.getElementById('msgType').value = 'ANSWER';
+            onMsgTypeChange();
+
+            // Ensure sender is an option in the recipient selector and select it
+            const recipientSelect = document.getElementById('msgRecipient');
+            let hasOption = false;
+            for (let i = 0; i < recipientSelect.options.length; i++) {
+                if (recipientSelect.options[i].value === sender) {
+                    hasOption = true;
+                    break;
+                }
+            }
+            if (!hasOption) {
+                const opt = document.createElement('option');
+                opt.value = sender;
+                opt.innerText = sender;
+                opt.className = "bg-discord-sidebar";
+                recipientSelect.appendChild(opt);
+            }
+            recipientSelect.value = sender;
+
+            // Use the replyTo helper to link back to the question's message ID
+            replyTo(id, sender, body);
         }
 
         function cancelReply() {

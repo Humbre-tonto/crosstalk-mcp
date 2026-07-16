@@ -257,3 +257,70 @@ def test_presence_sse_registration_and_pruning(db_isolation):
     crosstalk_mcp._prune_old_participants("pres_ch")
     participants = list(crosstalk_mcp._online_participants.get("pres_ch", {}).values())
     assert len(participants) == 0
+
+
+def test_side_classification_heuristic(db_isolation):
+    """Verify default name-heuristic side classification for agents."""
+    # Reset online participants to avoid side interference from previous tests
+    crosstalk_mcp._online_participants["heuristic_ch"] = {}
+
+    test_cases = {
+        "agentY": "Y",
+        "agent-b": "Y",
+        "agentX": "X",
+        "agent-a": "X",
+        "claude": "X",
+    }
+    for agent_name, expected_side in test_cases.items():
+        crosstalk_mcp._register_agent_presence("heuristic_ch", agent_name)
+        participant = crosstalk_mcp._online_participants["heuristic_ch"][agent_name]
+        assert participant["side"] == expected_side
+
+
+def test_side_classification_explicit_override(db_isolation):
+    """Verify that an explicit side overrides any name-heuristic defaults."""
+    crosstalk_mcp._online_participants["explicit_ch"] = {}
+
+    # agent-a would heuristically be "X", but we explicitly pass "Y"
+    crosstalk_mcp._post("explicit_ch", "agent-a", "NOTE", "hello", side="Y")
+    participant = crosstalk_mcp._online_participants["explicit_ch"]["agent-a"]
+    assert participant["side"] == "Y"
+
+    # claude would heuristically be "X", but we explicitly pass "Y" via registration directly
+    crosstalk_mcp._register_agent_presence("explicit_ch", "claude", side="Y")
+    participant = crosstalk_mcp._online_participants["explicit_ch"]["claude"]
+    assert participant["side"] == "Y"
+
+
+def test_get_directives_filtering(db_isolation):
+    """Test get_directives filters only INTERRUPT, DIRECTIVE, and open QUESTIONs, and honors recipient/broadcasts."""
+    ch = "directives_ch"
+    # 1. Open QUESTION addressed to humanX
+    crosstalk_mcp._post(ch, "agent-a", "QUESTION", "Q1?", recipient="humanX")
+    # 2. Answered QUESTION addressed to humanX
+    q2 = crosstalk_mcp._post(ch, "agent-a", "QUESTION", "Q2?", recipient="humanX")
+    crosstalk_mcp._post(ch, "humanX", "ANSWER", "A2", reply_to=q2["id"])
+    # 3. INTERRUPT addressed to humanX
+    crosstalk_mcp._post(ch, "agent-a", "INTERRUPT", "Stop!", recipient="humanX")
+    # 4. DIRECTIVE with no recipient (broadcast)
+    crosstalk_mcp._post(ch, "agent-a", "DIRECTIVE", "Broadcast action")
+    # 5. NOTE message (should be ignored)
+    crosstalk_mcp._post(ch, "agent-a", "NOTE", "regular note", recipient="humanX")
+    # 6. QUESTION addressed to humanY (should be ignored when queried for humanX)
+    crosstalk_mcp._post(ch, "agent-a", "QUESTION", "Q3?", recipient="humanY")
+
+    # Retrieve directives for humanX
+    directives = crosstalk_mcp._get_directives(ch, "humanX")
+    assert len(directives) == 3
+
+    # Check bodies/types of the matched ones:
+    # Match 1: Q1? (QUESTION, open, recipient="humanX")
+    # Match 2: Stop! (INTERRUPT, recipient="humanX")
+    # Match 3: Broadcast action (DIRECTIVE, recipient is null/empty)
+    matched_bodies = {d["body"] for d in directives}
+    assert "Q1?" in matched_bodies
+    assert "Stop!" in matched_bodies
+    assert "Broadcast action" in matched_bodies
+    assert "Q2?" not in matched_bodies
+    assert "regular note" not in matched_bodies
+    assert "Q3?" not in matched_bodies

@@ -49,7 +49,7 @@ _sessions: dict[str, dict[str, Any]] = {}
 _online_participants: dict[str, dict[str, dict[str, Any]]] = {}
 
 
-def _register_agent_presence(channel: str, sender: str) -> None:
+def _register_agent_presence(channel: str, sender: str, side: str | None = None) -> None:
     if sender == "human" or sender.startswith("human"):
         return
     if channel in _online_participants and sender in _online_participants[channel]:
@@ -58,13 +58,14 @@ def _register_agent_presence(channel: str, sender: str) -> None:
     if channel not in _online_participants:
         _online_participants[channel] = {}
 
-    sender_lower = sender.lower()
-    if sender_lower.endswith("x") or "-a" in sender_lower or "agent-a" in sender_lower:
-        side = "X"
-    elif sender_lower.endswith("y") or "-b" in sender_lower or "agent-b" in sender_lower:
-        side = "Y"
-    else:
-        side = "X" if any(char in sender_lower for char in ["x", "a"]) else "Y"
+    if not side:
+        sender_lower = sender.lower()
+        if sender_lower.endswith("x") or "-a" in sender_lower or "agent-a" in sender_lower:
+            side = "X"
+        elif sender_lower.endswith("y") or "-b" in sender_lower or "agent-b" in sender_lower:
+            side = "Y"
+        else:
+            side = "X" if any(char in sender_lower for char in ["x", "a"]) else "Y"
 
     _online_participants[channel][sender] = {
         "id": sender,
@@ -168,7 +169,7 @@ def _post(
     status: str | None = None,
     side: str | None = None,
 ) -> dict[str, Any]:
-    _register_agent_presence(channel, sender)
+    _register_agent_presence(channel, sender, side)
     # Manage session automatically if active
     if channel in _sessions:
         sess = _sessions[channel]
@@ -251,6 +252,22 @@ def _wait(channel: str, since_id: int = 0, timeout_s: float = 30.0) -> list[dict
             if remaining <= 0:
                 return []
             _notify.wait(remaining)
+
+
+def _get_directives(channel: str, recipient: str, since_id: int = 0) -> list[dict[str, Any]]:
+    """Retrieve unacknowledged messages of type INTERRUPT/DIRECTIVE (and open QUESTIONs)
+    addressed to `recipient` (including broadcasted ones where recipient is null/empty/any-human)."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id,channel,sender,type,body,created_at,session_id,recipient,reply_to,status,side "
+            "FROM messages "
+            "WHERE channel=? AND id>? "
+            "AND (type IN ('INTERRUPT', 'DIRECTIVE') OR (type='QUESTION' AND status='open')) "
+            "AND (recipient=? OR recipient IS NULL OR recipient='' OR recipient='any-human') "
+            "ORDER BY id",
+            (channel, since_id, recipient),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def _channels() -> list[dict[str, Any]]:
@@ -337,10 +354,26 @@ def list_channels() -> list:
     return _channels()
 
 
+@mcp.tool()
+def get_directives(channel: str, recipient: str, since_id: int = 0) -> list:
+    """Retrieve unacknowledged messages of type INTERRUPT/DIRECTIVE (and open QUESTIONs)
+    addressed to `recipient` (including channel/broadcasts), using the cursor model.
+    """
+    return _get_directives(channel, recipient, since_id)
+
+
 # ----- REST mirror (for humans/tools without an MCP client) -----
 @mcp.custom_route("/api/channels", methods=["GET"])
 async def rest_channels(_request: Request) -> JSONResponse:
     return JSONResponse(_channels())
+
+
+@mcp.custom_route("/api/channels/{channel}/directives", methods=["GET"])
+async def rest_get_directives(request: Request) -> JSONResponse:
+    channel = request.path_params["channel"]
+    recipient = request.query_params.get("recipient", "")
+    since_id = int(request.query_params.get("since_id", "0"))
+    return JSONResponse(_get_directives(channel, recipient, since_id))
 
 
 @mcp.custom_route("/api/channels/{channel}/messages", methods=["GET"])
