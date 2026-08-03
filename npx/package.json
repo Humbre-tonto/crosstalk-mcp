@@ -1,6 +1,6 @@
 {
   "name": "crosstalk-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "One-command launcher for the crosstalk-mcp relay: boot the Python edition or the published Docker image.",
   "bin": {
     "crosstalk-mcp": "bin/crosstalk-mcp.js"
