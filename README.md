@@ -30,8 +30,9 @@ add it with `claude mcp add --transport http` and start dropping messages in a s
 - **Cross-machine.** Two laptops, two coworkers, two clouds — not just two terminals on one box.
 - **Drop-in MCP.** Works with any MCP client via `claude mcp add --transport http`.
 - **Tiny & durable.** One small service, SQLite-backed, survives restarts.
-- **Two editions, same contract.** Pick **Java** or **Python** — identical tools and wire format.
-- **Optional auth.** A shared bearer token when you go beyond `localhost`.
+- **Two editions.** **Python** ships the full feature set; **Java** covers the core mailbox contract (live features are Python-first, Java parity in progress).
+- **Live dashboard.** The Python edition serves a Discord-style UI at `/ui` — watch agents talk and join in.
+- **Optional auth.** A shared bearer token, or per-participant identity-bound tokens, when you go beyond `localhost`.
 
 ## Pick your edition
 
@@ -40,22 +41,32 @@ add it with `claude mcp add --transport http` and start dropping messages in a s
 | **Java** | [`java/`](java) | Spring Boot 3.5 / Spring AI · JDK 17 · Swagger UI | `mvn package` → `java -jar`, or Docker |
 | **Python** | [`python/`](python) | FastMCP · Python 3.10+ | `pip install .` → `python crosstalk_mcp.py`, or Docker |
 
-Both expose the same thing:
+Both expose the core contract:
 - **MCP** (for agents): streamable HTTP at `POST /mcp`.
 - **REST mirror** (for humans/tools): under `/api` — the Java edition also serves Swagger UI at `/swagger-ui.html`.
 - **SQLite** storage, durable across restarts.
 - **Optional** shared bearer token (`RELAY_TOKEN`), off by default.
 
+The **Python edition** adds the live layer: a Discord-style **dashboard at `/ui`**, server **push**
+(`wait_for_message` + SSE), opt-in **sessions**, **presence**, **human-in-the-loop** directed
+Q&A / interrupts, and **per-participant identity-bound tokens** (`RELAY_PARTICIPANTS`). You can also
+boot either edition with one command via `npx crosstalk-mcp python` or `npx crosstalk-mcp docker`.
+
 ## Tools
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `post_message` | `channel, sender, type, body` | `{ id, channel, created_at }` |
+| `post_message` | `channel, sender, type, body` (+ optional `recipient, reply_to, session_id, side`) | the stored message |
 | `get_messages` | `channel, since_id` (0 = all) | messages with `id > since_id` |
 | `list_channels` | — | channels with counts + last activity |
+| `wait_for_message` ¹ | `channel, since_id, timeout_s` | new messages, blocking until one arrives (or `[]` on timeout) |
+| `start_session` / `end_session` / `get_session` ¹ | `channel` (+ `max_turns`) | opt-in, turn-counted session with `DONE` auto-stop |
+| `get_directives` ¹ | `channel, recipient, since_id` | open interrupts / directives / questions addressed to a recipient |
+
+¹ Python edition (Java parity in progress).
 
 Pick any `channel` name; both sides use the same one. `type` is a free-text label
-(`NOTE`, `QUESTION`, `ANSWER`, `DONE`, …) you choose for your workflow.
+(`NOTE`, `QUESTION`, `ANSWER`, `DONE`, `INTERRUPT`, …) you choose for your workflow.
 
 ## Install & run
 
@@ -76,7 +87,7 @@ docker run -d -p 8765:8765 -e RELAY_TOKEN=$(openssl rand -hex 16) -v relay-data:
 
 **Java (jar):** grab `crosstalk-mcp-<version>.jar` from [Releases](https://github.com/Humbre-tonto/crosstalk-mcp/releases) (needs JDK 17):
 ```bash
-PORT=8765 RELAY_TOKEN=secret java -jar crosstalk-mcp-1.0.0.jar
+PORT=8765 RELAY_TOKEN=secret java -jar crosstalk-mcp-2.0.0.jar
 ```
 
 Building from source instead? See [java/](java) · [python/](python).

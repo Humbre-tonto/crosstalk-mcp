@@ -9,7 +9,7 @@ the two agents can live on **different machines** (same LAN, a VPN, or a tunnel)
 > on the [`java`](../java) folder — pick whichever fits your stack.
 
 - **MCP** (for agents): streamable HTTP at `POST /mcp` — tools `post_message`, `get_messages`, `list_channels`.
-- **REST mirror** (for humans/tools): `GET /api/channels`, `GET|POST /api/channels/{channel}/messages`.
+- **REST mirror** (for humans/tools): `GET /api/channels`, `GET|POST /api/channels/{channel}/messages`, `GET /api/channels/{channel}/wait?since_id=&timeout_s=` (long-poll mirror of `wait_for_message`), `GET /api/channels/{channel}/stream?since_id=` (Server-Sent Events stream).
 - **Storage:** SQLite file (`relay.db`), durable across restarts.
 - **Auth:** optional shared bearer token (`RELAY_TOKEN`) — off by default, **strongly recommended** whenever the relay is reachable beyond `localhost`.
 
@@ -54,6 +54,7 @@ side so polling doesn't prompt for permission every time.
 | `post_message` | `channel, sender, type, body` | `{id, channel, created_at}` |
 | `get_messages` | `channel, since_id` (0 = all) | messages with `id > since_id` |
 | `list_channels` | — | channels with counts + last activity |
+| `wait_for_message` | `channel, since_id, timeout_s` (default 30, capped 300) | new messages with `id > since_id`, blocking until one arrives or timeout (`[]` on timeout) |
 
 Pick any `channel` name; both sides use the same one. `type` is a free-text label
 (`NOTE`, `QUESTION`, `ANSWER`, `DONE`, …) you define for your workflow.
@@ -64,12 +65,34 @@ Pick any `channel` name; both sides use the same one. `type` is a free-text labe
 2. Agent B polls `get_messages(channel, since_id)` (track the highest id seen), replies with `post_message(...)`.
 3. Repeat until both post a `DONE`. Drive it turn-by-turn ("check the relay and reply") or let each side poll on a loop.
 
+For **low-latency, cost-efficient back-and-forth**, skip polling altogether: an agent `post_message(...)` then `wait_for_message(channel, <last_id_seen>)` to block until the peer replies (or timeout). Loop that turn-by-turn instead. The relay still just moves messages; the agents drive who speaks when.
+
 ## Security
 
 - The relay moves data between machines. **Set `RELAY_TOKEN`** for anything beyond localhost,
   and prefer HTTPS (terminate TLS at a reverse proxy / tunnel) when exposed publicly.
 - Treat a channel as a shared bus: **don't post credentials, secrets, or PII.**
-- The token is a single shared secret; rotate it if it leaks.
+- The shared token is a single secret; rotate it if it leaks.
+
+### Per-participant tokens (identity binding)
+
+The shared `RELAY_TOKEN` gates the relay but does **not** stop one participant from claiming to be
+another (e.g. humanX posting as humanY). For that, set **`RELAY_PARTICIPANTS`** — a map of
+participant id to token:
+
+```bash
+RELAY_PARTICIPANTS="humanX:tokX,humanY:tokY,agentX:tokA" PORT=8765 python crosstalk_mcp.py
+```
+
+- Each request must present its participant's token (`Authorization: Bearer <token>`, or `?token=`
+  for browser SSE). The token is **bound** to its identity: it may only post as, or announce
+  presence as, its own id — a mismatch returns **403**. An unknown token returns **401**.
+- `RELAY_TOKEN` and `RELAY_PARTICIPANTS` can be combined. When both are set, the shared
+  `RELAY_TOKEN` still works as an **unbound privileged token** (no identity binding), which is handy
+  for agents/services; humans use their own per-participant tokens.
+- In the `/ui`, each person sets their **Participant ID** and **their token** in the identity
+  settings — the token must match the id it was issued for.
+- Ids and tokens must not contain `,` or `:` (the delimiters). Rotate any token that leaks.
 
 ## License
 

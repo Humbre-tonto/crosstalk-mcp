@@ -16,6 +16,9 @@ venv/
 *.egg-info/
 build/
 dist/
+.pytest_cache/
+*.log
+server_output.log
 
 # IDE
 .idea/

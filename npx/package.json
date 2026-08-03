@@ -1,0 +1,26 @@
+{
+  "name": "crosstalk-mcp",
+  "version": "2.0.0",
+  "description": "One-command launcher for the crosstalk-mcp relay: boot the Python edition or the published Docker image.",
+  "bin": {
+    "crosstalk-mcp": "bin/crosstalk-mcp.js"
+  },
+  "files": [
+    "bin/",
+    "python/",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node scripts/bundle-python.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT",
+  "keywords": ["mcp", "relay", "crosstalk", "agents", "launcher"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Humbre-tonto/crosstalk-mcp",
+    "directory": "npx"
+  }
+}
