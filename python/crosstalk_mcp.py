@@ -5,7 +5,12 @@ A tiny cross-machine relay MCP server: a shared "mailbox" two coding agents conn
 so they can message each other and run a back-and-forth until they're done.
 
 Transport: streamable HTTP MCP at /mcp; a small REST mirror under /api.
-Auth:      optional shared bearer token via env RELAY_TOKEN (enforced only if set).
+Auth:      optional shared bearer token via env RELAY_TOKEN (enforced only if set), and/or
+           optional per-participant tokens via env RELAY_PARTICIPANTS ("id:token,id2:token2").
+           A per-participant token binds the caller to that identity: it may only post as, or
+           announce presence as, its own participant id (mismatch -> 403). This is what stops
+           humanX from impersonating humanY. The shared RELAY_TOKEN, if also set, still works as
+           an unbound privileged token (handy for agents/services). Neither set -> relay is open.
 Storage:   SQLite (env RELAY_DB, default relay.db), durable across restarts.
 
 Tools:      post_message, get_messages, wait_for_message, list_channels.
@@ -15,11 +20,13 @@ Run:  RELAY_TOKEN=secret PORT=8765 python crosstalk_mcp.py
 """
 
 import asyncio
+import hmac
 import json
 import os
 import sqlite3
 import threading
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -30,9 +37,31 @@ from starlette.responses import JSONResponse, StreamingResponse, Response
 from mcp.server.fastmcp import FastMCP
 
 RELAY_TOKEN = os.environ.get("RELAY_TOKEN")
+RELAY_PARTICIPANTS = os.environ.get("RELAY_PARTICIPANTS", "")
 DB_PATH = os.environ.get("RELAY_DB", "relay.db")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8765"))
+
+
+def _parse_participant_tokens(raw: str) -> dict[str, str]:
+    """Parse the RELAY_PARTICIPANTS env ("id:token,id2:token2") into {token: participant_id}.
+
+    Keyed by token so auth is a token -> identity lookup. Blank or malformed pairs are skipped.
+    Participant ids and tokens must not contain ',' or ':' (the delimiters)."""
+    mapping: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        pid, _, tok = pair.partition(":")
+        pid, tok = pid.strip(), tok.strip()
+        if pid and tok:
+            mapping[tok] = pid
+    return mapping
+
+
+# {token: participant_id} for per-participant auth; empty dict => feature off.
+_PARTICIPANT_TOKENS = _parse_participant_tokens(RELAY_PARTICIPANTS)
 
 _write_lock = threading.Lock()
 
@@ -363,6 +392,23 @@ def get_directives(channel: str, recipient: str, since_id: int = 0) -> list:
 
 
 # ----- REST mirror (for humans/tools without an MCP client) -----
+def _enforce_identity(request: Request, asserted_id: str | None) -> JSONResponse | None:
+    """Per-participant guard: a request authenticated with a *bound* participant token may only
+    assert its own identity. Returns a 403 response on mismatch, else None (allowed).
+
+    A no-op when per-participant auth is off, when the request used the unbound shared token, or
+    when no identity is asserted -> fully backward compatible."""
+    scope = getattr(request, "scope", None) or {}
+    auth_pid = scope.get("auth_participant")
+    if auth_pid is not None and asserted_id is not None and asserted_id != auth_pid:
+        return JSONResponse(
+            {"error": "forbidden",
+             "detail": f"token is bound to '{auth_pid}', cannot act as '{asserted_id}'"},
+            status_code=403,
+        )
+    return None
+
+
 @mcp.custom_route("/api/channels", methods=["GET"])
 async def rest_channels(_request: Request) -> JSONResponse:
     return JSONResponse(_channels())
@@ -387,6 +433,9 @@ async def rest_get(request: Request) -> JSONResponse:
 async def rest_post(request: Request) -> JSONResponse:
     channel = request.path_params["channel"]
     data = await request.json()
+    denied = _enforce_identity(request, data.get("sender"))
+    if denied is not None:
+        return denied
     return JSONResponse(
         _post(
             channel,
@@ -454,6 +503,10 @@ async def rest_stream(request: Request) -> StreamingResponse:
     display_name = request.query_params.get("display_name", pid)
     kind = request.query_params.get("kind", "human")
     side = request.query_params.get("side", "")
+
+    denied = _enforce_identity(request, pid)
+    if denied is not None:
+        return denied
 
     if pid:
         if channel not in _online_participants:
@@ -526,57 +579,69 @@ async def rest_index(_request: Request) -> Response:
 
 class _BearerTokenMiddleware:
     """Pure-ASGI bearer-token gate (kept out of BaseHTTPMiddleware to not buffer SSE).
-    Lifespan and non-HTTP scopes pass straight through."""
+    Lifespan and non-HTTP scopes pass straight through.
 
-    def __init__(self, app, token: str):
+    Accepts a token from the `Authorization: Bearer` header or a `?token=`/`?relay_token=`
+    query param (the latter is needed because browser EventSource cannot set headers). A valid
+    per-participant token stamps `scope["auth_participant"]` with that identity so downstream
+    handlers can bind actions to it; the unbound shared token leaves it None (privileged)."""
+
+    def __init__(self, app, shared_token: str | None = None,
+                 participant_tokens: dict[str, str] | None = None):
         self.app = app
-        self.token = token
+        self.shared_token = shared_token
+        self.participant_tokens = participant_tokens or {}
+
+    @staticmethod
+    def _extract_token(scope) -> str | None:
+        headers = dict(scope.get("headers") or [])
+        auth = headers.get(b"authorization", b"").decode()
+        if auth.startswith("Bearer "):
+            return auth[7:]
+        params = urllib.parse.parse_qs(scope.get("query_string", b"").decode())
+        return params.get("token", params.get("relay_token", [None]))[0]
+
+    def _resolve(self, token: str | None) -> tuple[bool, str | None]:
+        """Return (authorized, participant_id). participant_id is None for the unbound
+        shared token. Constant-time comparisons throughout."""
+        if token is None:
+            return (False, None)
+        for tok, pid in self.participant_tokens.items():
+            if hmac.compare_digest(token, tok):
+                return (True, pid)
+        if self.shared_token and hmac.compare_digest(token, self.shared_token):
+            return (True, None)
+        return (False, None)
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http":
             path = scope.get("path", "")
-            # Exempt UI routes from the bearer token gate so the browser can load /ui first
+            # Exempt UI routes from the token gate so the browser can load /ui first
             if path in ["/", "/ui"]:
                 await self.app(scope, receive, send)
                 return
 
-            headers = dict(scope.get("headers") or [])
-            auth = headers.get(b"authorization", b"").decode()
-
-            import hmac
-            token_matched = False
-
-            # 1. Check Bearer Authorization header using constant-time comparison
-            if auth.startswith("Bearer "):
-                provided_token = auth[7:]
-                if hmac.compare_digest(provided_token, self.token):
-                    token_matched = True
-
-            # 2. Check query parameters (necessary for EventSource SSE stream connections)
-            if not token_matched:
-                query_string = scope.get("query_string", b"").decode()
-                import urllib.parse
-                params = urllib.parse.parse_qs(query_string)
-                q_token = params.get("token", params.get("relay_token", [None]))[0]
-                if q_token and hmac.compare_digest(q_token, self.token):
-                    token_matched = True
-
-            if not token_matched:
+            authorized, pid = self._resolve(self._extract_token(scope))
+            if not authorized:
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
+            # Stamp the bound identity (or None for the shared token) for handler-side enforcement.
+            scope["auth_participant"] = pid
 
         await self.app(scope, receive, send)
 
 
 def main() -> None:
-    if not RELAY_TOKEN:
+    if not RELAY_TOKEN and not _PARTICIPANT_TOKENS:
         print(
-            "WARNING: RELAY_TOKEN is not set - the relay is OPEN to anyone who can reach it. "
-            "Set RELAY_TOKEN to require an Authorization: Bearer <token> header."
+            "WARNING: neither RELAY_TOKEN nor RELAY_PARTICIPANTS is set - the relay is OPEN to "
+            "anyone who can reach it. Set RELAY_TOKEN for a shared bearer token, and/or "
+            "RELAY_PARTICIPANTS=\"id:token,...\" for per-participant identity-bound tokens."
         )
     app = mcp.streamable_http_app()  # Starlette app serving MCP at /mcp + the /api routes above
-    if RELAY_TOKEN:
-        app = _BearerTokenMiddleware(app, RELAY_TOKEN)
+    if RELAY_TOKEN or _PARTICIPANT_TOKENS:
+        app = _BearerTokenMiddleware(app, shared_token=RELAY_TOKEN,
+                                     participant_tokens=_PARTICIPANT_TOKENS)
     uvicorn.run(app, host=HOST, port=PORT)
 
 

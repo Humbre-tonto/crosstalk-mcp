@@ -292,7 +292,7 @@
                 </div>
                 <div class="space-y-1.5">
                     <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Relay Token (Optional)</label>
-                    <input type="password" id="modalToken" placeholder="Enter RELAY_TOKEN if configured"
+                    <input type="password" id="modalToken" placeholder="Shared RELAY_TOKEN, or your per-participant token"
                         class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
                 </div>
                 <div class="space-y-1 bg-discord-darkest/50 p-3 rounded text-xs text-discord-muted border border-discord-darkest">
@@ -361,6 +361,8 @@
                 const response = await fetch(url, options);
                 if (response.status === 401) {
                     showAuthWarning(true, "Unauthorized! Please configure a valid Relay Token in settings (gear icon at bottom-left).");
+                } else if (response.status === 403) {
+                    showAuthWarning(true, "Your token is bound to a different participant. Set your Participant ID in settings to match the identity your token was issued for.");
                 } else if (response.ok) {
                     showAuthWarning(false);
                 }
