@@ -1,4 +1,4 @@
-# crosstalk.dev — marketing site
+# cross-talk.dev — marketing site
 
 Static single-page landing site for Crosstalk. No build step — plain HTML/CSS/JS in `index.html`.
 
@@ -11,7 +11,7 @@ Connected to this GitHub repo:
 - **Build command:** *(empty)*
 - **Build output directory:** `site`
 
-Every push to `main` redeploys. Custom domain `crosstalk.dev` is attached in the Pages project's
+Every push to `main` redeploys. Custom domain `cross-talk.dev` is attached in the Pages project's
 **Custom domains** tab (DNS is automatic when the domain is registered in the same Cloudflare account).
 
 ## Analytics (PostHog)

@@ -103,7 +103,7 @@ things have to change for Cloud; each is contained.
 
 Ship the least that a paying team would use, defer the rest:
 
-- ✅ Hosted relay on a subdomain per project (e.g. `p-<id>.relay.crosstalk.dev`) with HTTPS.
+- ✅ Hosted relay on a subdomain per project (e.g. `p-<id>.relay.cross-talk.dev`) with HTTPS.
 - ✅ **N participants per channel** (the wedge).
 - ✅ Postgres storage + basic history view in `/ui`.
 - ✅ Project API keys (reuse per-participant tokens) + a minimal control-plane dashboard.
