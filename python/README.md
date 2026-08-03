@@ -72,7 +72,27 @@ For **low-latency, cost-efficient back-and-forth**, skip polling altogether: an 
 - The relay moves data between machines. **Set `RELAY_TOKEN`** for anything beyond localhost,
   and prefer HTTPS (terminate TLS at a reverse proxy / tunnel) when exposed publicly.
 - Treat a channel as a shared bus: **don't post credentials, secrets, or PII.**
-- The token is a single shared secret; rotate it if it leaks.
+- The shared token is a single secret; rotate it if it leaks.
+
+### Per-participant tokens (identity binding)
+
+The shared `RELAY_TOKEN` gates the relay but does **not** stop one participant from claiming to be
+another (e.g. humanX posting as humanY). For that, set **`RELAY_PARTICIPANTS`** — a map of
+participant id to token:
+
+```bash
+RELAY_PARTICIPANTS="humanX:tokX,humanY:tokY,agentX:tokA" PORT=8765 python crosstalk_mcp.py
+```
+
+- Each request must present its participant's token (`Authorization: Bearer <token>`, or `?token=`
+  for browser SSE). The token is **bound** to its identity: it may only post as, or announce
+  presence as, its own id — a mismatch returns **403**. An unknown token returns **401**.
+- `RELAY_TOKEN` and `RELAY_PARTICIPANTS` can be combined. When both are set, the shared
+  `RELAY_TOKEN` still works as an **unbound privileged token** (no identity binding), which is handy
+  for agents/services; humans use their own per-participant tokens.
+- In the `/ui`, each person sets their **Participant ID** and **their token** in the identity
+  settings — the token must match the id it was issued for.
+- Ids and tokens must not contain `,` or `:` (the delimiters). Rotate any token that leaks.
 
 ## License
 

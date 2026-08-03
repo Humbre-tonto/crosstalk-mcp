@@ -324,3 +324,76 @@ def test_get_directives_filtering(db_isolation):
     assert "Q2?" not in matched_bodies
     assert "regular note" not in matched_bodies
     assert "Q3?" not in matched_bodies
+
+
+# ----- per-participant auth -----
+def test_parse_participant_tokens():
+    """RELAY_PARTICIPANTS parsing: token->id map, skipping blanks/malformed."""
+    parsed = crosstalk_mcp._parse_participant_tokens("humanX:tokX, humanY:tokY ,,bad,agentA:tokA")
+    assert parsed == {"tokX": "humanX", "tokY": "humanY", "tokA": "agentA"}
+    assert crosstalk_mcp._parse_participant_tokens("") == {}
+
+
+def _auth_client(participant_tokens, shared_token=None):
+    """TestClient over the REST app wrapped in the bearer middleware. Used WITHOUT a lifespan
+    context (`with`) on purpose: these tests exercise only the /api routes + middleware, and the
+    FastMCP streamable-HTTP session manager may only be run once per process (claimed by an
+    earlier lifespan test), so entering another lifespan here would raise."""
+    app = crosstalk_mcp.mcp.streamable_http_app()
+    app = crosstalk_mcp._BearerTokenMiddleware(
+        app, shared_token=shared_token, participant_tokens=participant_tokens
+    )
+    return TestClient(app)
+
+
+def test_per_participant_bound_token_allows_matching_sender(db_isolation):
+    """A bound participant token may post as its own identity (200)."""
+    client = _auth_client({"tokX": "humanX", "tokY": "humanY"})
+    resp = client.post(
+        "/api/channels/authch/messages",
+        json={"sender": "humanX", "type": "NOTE", "body": "hi"},
+        headers={"Authorization": "Bearer tokX"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["sender"] == "humanX"
+
+
+def test_per_participant_bound_token_rejects_impersonation(db_isolation):
+    """humanX's token cannot post as humanY (403) - the core anti-impersonation guarantee."""
+    client = _auth_client({"tokX": "humanX", "tokY": "humanY"})
+    resp = client.post(
+        "/api/channels/authch/messages",
+        json={"sender": "humanY", "type": "NOTE", "body": "spoof"},
+        headers={"Authorization": "Bearer tokX"},
+    )
+    assert resp.status_code == 403
+
+
+def test_per_participant_unknown_token_unauthorized(db_isolation):
+    """An unrecognized token is rejected before reaching a handler (401)."""
+    client = _auth_client({"tokX": "humanX"})
+    resp = client.post(
+        "/api/channels/authch/messages",
+        json={"sender": "humanX", "type": "NOTE", "body": "hi"},
+        headers={"Authorization": "Bearer nope"},
+    )
+    assert resp.status_code == 401
+
+
+def test_per_participant_token_via_query_param(db_isolation):
+    """Query-param token (the SSE path, since EventSource can't set headers) also authorizes."""
+    client = _auth_client({"tokX": "humanX"})
+    assert client.get("/api/channels?token=tokX").status_code == 200
+    assert client.get("/api/channels?token=bad").status_code == 401
+
+
+def test_shared_token_is_unbound_privileged(db_isolation):
+    """With both configured, the shared token authenticates but is NOT bound to an identity,
+    so it may post as any sender (backward compatible for agents/services)."""
+    client = _auth_client({"tokX": "humanX"}, shared_token="admintok")
+    resp = client.post(
+        "/api/channels/authch/messages",
+        json={"sender": "anyone-at-all", "type": "NOTE", "body": "hi"},
+        headers={"Authorization": "Bearer admintok"},
+    )
+    assert resp.status_code == 200
