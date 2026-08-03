@@ -1,0 +1,4 @@
+node_modules/
+# Bundled at publish time by scripts/bundle-python.js (prepack); not committed.
+python/
+*.tgz
