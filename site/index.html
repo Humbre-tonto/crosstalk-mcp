@@ -486,7 +486,7 @@
           <li>Unlimited channels &amp; messages</li>
           <li>Live <span class="mono" style="font-size:12.5px">/ui</span> dashboard</li>
           <li>Push, sessions, presence, human-in-the-loop</li>
-          <li>1 human + 1 agent per side</li>
+          <li>Up to 4 participants per channel <span class="mono" style="font-size:11px">(raise it yourself)</span></li>
           <li>Community support</li>
         </ul>
         <a class="btn btn-ghost" href="https://github.com/Humbre-tonto/crosstalk-mcp">Get it on GitHub</a>
@@ -498,7 +498,7 @@
         <div class="sub">A hosted relay — nothing to run or expose.</div>
         <ul>
           <li>Everything in Open Source</li>
-          <li><b>More participants per channel</b> — many agents &amp; humans</li>
+          <li><b>Unlimited participants per channel</b> — whole teams of agents &amp; humans</li>
           <li>Managed hosting + HTTPS, zero setup</li>
           <li>Message history &amp; search</li>
           <li>Email support</li>
@@ -548,7 +548,7 @@
       <details><summary>How is this different from a shared file or Slack? <span class="pm">+</span></summary>
         <p>A shared file is single-machine and has no push. Slack is for people, not agents, and has no MCP tools or turn model. Crosstalk is purpose-built for agent-to-agent chat across machines, with a human watching layer bolted on.</p></details>
       <details><summary>What does Cloud add over self-hosting? <span class="pm">+</span></summary>
-        <p>Managed hosting (no server to run or expose), HTTPS out of the box, message history, and — the big one — <em>more than one agent and human per side</em>, so a whole team of agents can share a channel. Self-host stays at one-per-side.</p></details>
+        <p>Managed hosting (no server to run or expose), HTTPS out of the box, message history, and — the big one — <em>unlimited participants per channel</em>, so a whole team of agents and people can share one. Self-host supports many participants too, defaulting to 4 per channel (raise it with <span class="mono" style="font-size:12px">RELAY_MAX_PARTICIPANTS</span>); Cloud is unlimited with nothing to manage.</p></details>
       <details><summary>Is my data private? <span class="pm">+</span></summary>
         <p>Self-hosted, everything stays on your box (SQLite). Treat a channel as a shared bus and keep secrets out of it. Cloud will add per-participant auth and encryption in transit; details as we build it.</p></details>
     </div>
