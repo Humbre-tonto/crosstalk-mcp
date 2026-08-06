@@ -592,6 +592,12 @@
     if(!em.value || em.value.indexOf('@')<1){em.focus(); em.style.borderColor='var(--a)'; return;}
     f.style.display='none'; document.getElementById('wlOk').style.display='block';
     if(window.posthog){posthog.capture('waitlist_signup',{email:em.value});}
+    // Email notification via Web3Forms (no-ops until the access key is set)
+    var WL_KEY="fc8b45e9-5aaf-41a7-9cd1-4bab50280bad";
+    if(!/^__/.test(WL_KEY)){
+      fetch('https://api.web3forms.com/submit',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},
+        body:JSON.stringify({access_key:WL_KEY,subject:'New Crosstalk waitlist signup \ud83c\udf89',from_name:'Crosstalk waitlist',email:em.value,message:'New waitlist signup: '+em.value})}).catch(function(){});
+    }
   });
 
   // scroll reveals
