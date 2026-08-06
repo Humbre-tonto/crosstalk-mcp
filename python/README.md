@@ -94,6 +94,24 @@ RELAY_PARTICIPANTS="humanX:tokX,humanY:tokY,agentX:tokA" PORT=8765 python crosst
   settings — the token must match the id it was issued for.
 - Ids and tokens must not contain `,` or `:` (the delimiters). Rotate any token that leaks.
 
+## Participants per channel
+
+A channel can hold **many agents and humans**, each addressable — not just two sides. The number of
+live participants per channel is capped by **`RELAY_MAX_PARTICIPANTS`** (default **4**, `0` =
+unlimited); a join or post beyond the cap returns **403 `channel_full`**.
+
+```bash
+RELAY_MAX_PARTICIPANTS=12 PORT=8765 python crosstalk_mcp.py   # allow up to 12 per channel
+```
+
+- **Roles are free-form.** A participant's `side` is now any optional label (a team/role), not a
+  forced `X`/`Y`. Leave it unset if you don't need it.
+- **Group addressing.** A message's `recipient` may be a participant id **or** a group token —
+  `any-human`, `any-agent`, `all`, or `side:<role>` — and `get_directives(channel, recipient)`
+  returns everything addressed to that participant, its groups, or broadcast.
+- **Sessions** auto-stop when every participant that spoke has posted `DONE` (min 2 speakers), or at
+  an explicit `min_done` quorum.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -12,6 +12,7 @@ Auth:      optional shared bearer token via env RELAY_TOKEN (enforced only if se
            humanX from impersonating humanY. The shared RELAY_TOKEN, if also set, still works as
            an unbound privileged token (handy for agents/services). Neither set -> relay is open.
 Storage:   SQLite (env RELAY_DB, default relay.db), durable across restarts.
+Limits:    up to RELAY_MAX_PARTICIPANTS live participants per channel (default 4, 0 = unlimited).
 
 Tools:      post_message, get_messages, wait_for_message, list_channels.
 Endpoints:  GET/POST /api/channels/{channel}/messages, GET .../wait (long-poll),
@@ -38,6 +39,8 @@ from mcp.server.fastmcp import FastMCP
 
 RELAY_TOKEN = os.environ.get("RELAY_TOKEN")
 RELAY_PARTICIPANTS = os.environ.get("RELAY_PARTICIPANTS", "")
+# Max distinct live participants per channel. 0 = unlimited. Cloud raises this per plan.
+RELAY_MAX_PARTICIPANTS = int(os.environ.get("RELAY_MAX_PARTICIPANTS", "4"))
 DB_PATH = os.environ.get("RELAY_DB", "relay.db")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8765"))
@@ -87,20 +90,13 @@ def _register_agent_presence(channel: str, sender: str, side: str | None = None)
     if channel not in _online_participants:
         _online_participants[channel] = {}
 
-    if not side:
-        sender_lower = sender.lower()
-        if sender_lower.endswith("x") or "-a" in sender_lower or "agent-a" in sender_lower:
-            side = "X"
-        elif sender_lower.endswith("y") or "-b" in sender_lower or "agent-b" in sender_lower:
-            side = "Y"
-        else:
-            side = "X" if any(char in sender_lower for char in ["x", "a"]) else "Y"
-
+    # `side` is an optional free-form role/team tag now (any string, or None) — no longer a
+    # forced binary X/Y guess, so a channel can hold N participants with arbitrary roles.
     _online_participants[channel][sender] = {
         "id": sender,
         "display_name": sender,
         "kind": "agent",
-        "side": side,
+        "side": side or None,
         "last_seen": time.time()
     }
 
@@ -117,15 +113,39 @@ def _prune_old_participants(channel: str) -> None:
         _online_participants[channel].pop(pid, None)
 
 
-def _start_session(channel: str, max_turns: int | None = None) -> dict[str, Any]:
+def _channel_full(channel: str, participant_id: str) -> bool:
+    """True if admitting a NEW participant would exceed RELAY_MAX_PARTICIPANTS (0 = unlimited).
+    Prunes stale participants first; an already-present id is never 'full' (re-join/heartbeat)."""
+    if RELAY_MAX_PARTICIPANTS <= 0:
+        return False
+    _prune_old_participants(channel)
+    present = _online_participants.get(channel, {})
+    if participant_id in present:
+        return False
+    return len(present) >= RELAY_MAX_PARTICIPANTS
+
+
+def _join_denied(channel: str, participant_id: str | None) -> dict[str, Any] | None:
+    """Return a channel_full error dict if this id can't join, else None. No-op when the id is
+    empty (a message with no participant identity doesn't consume a presence slot)."""
+    if participant_id and _channel_full(channel, participant_id):
+        return {"error": "channel_full", "limit": RELAY_MAX_PARTICIPANTS}
+    return None
+
+
+def _start_session(channel: str, max_turns: int | None = None,
+                   min_done: int | None = None) -> dict[str, Any]:
     session_id = str(uuid.uuid4())
     _sessions[channel] = {
         "session_id": session_id,
         "max_turns": max_turns,
+        "min_done": min_done,       # explicit DONE quorum; None = "all speakers, min 2"
         "turn_count": 0,
+        "speakers": set(),          # every distinct sender that has posted in this session
         "done_senders": set(),
     }
-    return {"channel": channel, "session_id": session_id, "max_turns": max_turns, "status": "active"}
+    return {"channel": channel, "session_id": session_id, "max_turns": max_turns,
+            "min_done": min_done, "status": "active"}
 
 
 def _end_session(channel: str) -> dict[str, Any]:
@@ -205,19 +225,23 @@ def _post(
         if not session_id:
             session_id = sess["session_id"]
         sess["turn_count"] += 1
+        sess["speakers"].add(sender)
 
         if type_.upper() == "DONE":
             sess["done_senders"].add(sender)
 
-        # Check for auto-stop conditions
+        # Auto-stop: an explicit min_done quorum, else "every speaker has posted DONE" (min 2
+        # speakers) — generalizes the old hard-coded two-sides rule to N participants.
         auto_stop = False
-        if len(sess["done_senders"]) >= 2:
+        min_done = sess.get("min_done")
+        if min_done:
+            auto_stop = len(sess["done_senders"]) >= min_done
+        elif len(sess["speakers"]) >= 2 and sess["speakers"] <= sess["done_senders"]:
             auto_stop = True
-        elif sess["max_turns"] is not None and sess["turn_count"] >= sess["max_turns"]:
+        if not auto_stop and sess["max_turns"] is not None and sess["turn_count"] >= sess["max_turns"]:
             auto_stop = True
 
         if auto_stop:
-            # End the session
             _sessions.pop(channel, None)
 
     ts = datetime.now(timezone.utc).isoformat()
@@ -283,18 +307,38 @@ def _wait(channel: str, since_id: int = 0, timeout_s: float = 30.0) -> list[dict
             _notify.wait(remaining)
 
 
+def _recipient_groups(channel: str, recipient: str) -> set[str]:
+    """The set of `recipient` values that address this participant: itself, the explicit
+    broadcast token `all`, plus the group tokens it belongs to (`any-human`/`any-agent`,
+    `side:<role>`). Membership is resolved from live presence, falling back to the id prefix
+    (human*/agent*) when the participant isn't currently registered."""
+    p = _online_participants.get(channel, {}).get(recipient, {})
+    kind, side = p.get("kind"), p.get("side")
+    groups = {recipient, "all"}
+    if kind == "human" or (kind is None and recipient.startswith("human")):
+        groups.add("any-human")
+    if kind == "agent" or (kind is None and recipient.startswith("agent")):
+        groups.add("any-agent")
+    if side:
+        groups.add(f"side:{side}")
+    return groups
+
+
 def _get_directives(channel: str, recipient: str, since_id: int = 0) -> list[dict[str, Any]]:
     """Retrieve unacknowledged messages of type INTERRUPT/DIRECTIVE (and open QUESTIONs)
-    addressed to `recipient` (including broadcasted ones where recipient is null/empty/any-human)."""
+    addressed to `recipient` — directly, to a group it belongs to (any-human / any-agent /
+    all / side:<role>), or broadcast (null/empty recipient). Works for N participants."""
+    groups = _recipient_groups(channel, recipient)
+    placeholders = ",".join("?" for _ in groups)
     with _conn() as c:
         rows = c.execute(
             "SELECT id,channel,sender,type,body,created_at,session_id,recipient,reply_to,status,side "
             "FROM messages "
             "WHERE channel=? AND id>? "
             "AND (type IN ('INTERRUPT', 'DIRECTIVE') OR (type='QUESTION' AND status='open')) "
-            "AND (recipient=? OR recipient IS NULL OR recipient='' OR recipient='any-human') "
+            f"AND (recipient IN ({placeholders}) OR recipient IS NULL OR recipient='') "
             "ORDER BY id",
-            (channel, since_id, recipient),
+            (channel, since_id, *groups),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -328,19 +372,26 @@ def post_message(
 
     Treat the channel as a shared, possibly internet-reachable bus - do not post secrets.
     channel: e.g. "my-project"; sender: e.g. "agent-a"; type: free-text label
-    (NOTE/QUESTION/ANSWER/DONE...); body: the content.
+    (NOTE/QUESTION/ANSWER/DONE/INTERRUPT...); body: the content. recipient may be a
+    participant id or a group (any-human/any-agent/all/side:<role>). Returns a
+    {"error":"channel_full"} dict if the channel is at its participant limit.
     """
+    denied = _join_denied(channel, sender)
+    if denied is not None:
+        return denied
     return _post(channel, sender, type, body, session_id, recipient, reply_to, status, side)
 
 
 @mcp.tool()
-def start_session(channel: str, max_turns: int | None = None) -> dict:
+def start_session(channel: str, max_turns: int | None = None,
+                  min_done: int | None = None) -> dict:
     """Start an opt-in session grouping messages on a channel.
 
-    A session enables turn counting and automatic ending of the session when max_turns
-    is exceeded, or when both sides (at least 2 distinct senders) post a 'DONE' message.
+    A session counts turns and auto-ends when max_turns is exceeded, or when the DONE quorum
+    is met. By default the quorum is "every participant that spoke has posted DONE" (min 2
+    speakers); pass min_done to require exactly that many distinct DONE senders instead.
     """
-    return _start_session(channel, max_turns)
+    return _start_session(channel, max_turns, min_done)
 
 
 @mcp.tool()
@@ -386,7 +437,8 @@ def list_channels() -> list:
 @mcp.tool()
 def get_directives(channel: str, recipient: str, since_id: int = 0) -> list:
     """Retrieve unacknowledged messages of type INTERRUPT/DIRECTIVE (and open QUESTIONs)
-    addressed to `recipient` (including channel/broadcasts), using the cursor model.
+    addressed to `recipient` — directly, via a group it belongs to (any-human / any-agent /
+    all / side:<role>), or broadcast — using the cursor model.
     """
     return _get_directives(channel, recipient, since_id)
 
@@ -436,6 +488,9 @@ async def rest_post(request: Request) -> JSONResponse:
     denied = _enforce_identity(request, data.get("sender"))
     if denied is not None:
         return denied
+    full = _join_denied(channel, data.get("sender"))
+    if full is not None:
+        return JSONResponse(full, status_code=403)
     return JSONResponse(
         _post(
             channel,
@@ -461,7 +516,10 @@ async def rest_start_session(request: Request) -> JSONResponse:
     max_turns = data.get("max_turns")
     if max_turns is not None:
         max_turns = int(max_turns)
-    return JSONResponse(_start_session(channel, max_turns))
+    min_done = data.get("min_done")
+    if min_done is not None:
+        min_done = int(min_done)
+    return JSONResponse(_start_session(channel, max_turns, min_done))
 
 
 @mcp.custom_route("/api/channels/{channel}/session", methods=["DELETE"])
@@ -508,6 +566,10 @@ async def rest_stream(request: Request) -> StreamingResponse:
     if denied is not None:
         return denied
 
+    full = _join_denied(channel, pid)
+    if full is not None:
+        return JSONResponse(full, status_code=403)
+
     if pid:
         if channel not in _online_participants:
             _online_participants[channel] = {}
@@ -515,7 +577,7 @@ async def rest_stream(request: Request) -> StreamingResponse:
             "id": pid,
             "display_name": display_name,
             "kind": kind,
-            "side": side,
+            "side": side or None,
             "last_seen": time.time()
         }
 
