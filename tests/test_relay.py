@@ -259,37 +259,21 @@ def test_presence_sse_registration_and_pruning(db_isolation):
     assert len(participants) == 0
 
 
-def test_side_classification_heuristic(db_isolation):
-    """Verify default name-heuristic side classification for agents."""
-    # Reset online participants to avoid side interference from previous tests
-    crosstalk_mcp._online_participants["heuristic_ch"] = {}
-
-    test_cases = {
-        "agentY": "Y",
-        "agent-b": "Y",
-        "agentX": "X",
-        "agent-a": "X",
-        "claude": "X",
-    }
-    for agent_name, expected_side in test_cases.items():
-        crosstalk_mcp._register_agent_presence("heuristic_ch", agent_name)
-        participant = crosstalk_mcp._online_participants["heuristic_ch"][agent_name]
-        assert participant["side"] == expected_side
+def test_side_is_optional_not_guessed(db_isolation):
+    """With no explicit side, presence side is None (no more X/Y name-guessing)."""
+    crosstalk_mcp._online_participants["opt_ch"] = {}
+    for name in ["agentY", "agent-b", "claude", "gpt-worker"]:
+        crosstalk_mcp._register_agent_presence("opt_ch", name)
+        assert crosstalk_mcp._online_participants["opt_ch"][name]["side"] is None
 
 
-def test_side_classification_explicit_override(db_isolation):
-    """Verify that an explicit side overrides any name-heuristic defaults."""
-    crosstalk_mcp._online_participants["explicit_ch"] = {}
-
-    # agent-a would heuristically be "X", but we explicitly pass "Y"
-    crosstalk_mcp._post("explicit_ch", "agent-a", "NOTE", "hello", side="Y")
-    participant = crosstalk_mcp._online_participants["explicit_ch"]["agent-a"]
-    assert participant["side"] == "Y"
-
-    # claude would heuristically be "X", but we explicitly pass "Y" via registration directly
-    crosstalk_mcp._register_agent_presence("explicit_ch", "claude", side="Y")
-    participant = crosstalk_mcp._online_participants["explicit_ch"]["claude"]
-    assert participant["side"] == "Y"
+def test_side_explicit_free_form(db_isolation):
+    """An explicit side/role is stored verbatim (any string), via post or direct registration."""
+    crosstalk_mcp._online_participants["role_ch"] = {}
+    crosstalk_mcp._post("role_ch", "agent-a", "NOTE", "hello", side="backend")
+    assert crosstalk_mcp._online_participants["role_ch"]["agent-a"]["side"] == "backend"
+    crosstalk_mcp._register_agent_presence("role_ch", "claude", side="Y")
+    assert crosstalk_mcp._online_participants["role_ch"]["claude"]["side"] == "Y"
 
 
 def test_get_directives_filtering(db_isolation):
@@ -397,3 +381,77 @@ def test_shared_token_is_unbound_privileged(db_isolation):
         headers={"Authorization": "Bearer admintok"},
     )
     assert resp.status_code == 200
+
+
+# ----- C1: N participants per channel -----
+def test_n_participants_register(db_isolation, monkeypatch):
+    """A channel holds many participants (not just two sides)."""
+    monkeypatch.setattr(crosstalk_mcp, "RELAY_MAX_PARTICIPANTS", 0)  # unlimited
+    crosstalk_mcp._online_participants["big"] = {}
+    for a in ["agent-1", "agent-2", "agent-3", "agent-4", "agent-5"]:
+        crosstalk_mcp._register_agent_presence("big", a)
+    assert len(crosstalk_mcp._online_participants["big"]) == 5
+
+
+def test_participant_cap_enforced(db_isolation, monkeypatch):
+    """_join_denied blocks a NEW participant once the cap is reached; re-join is allowed."""
+    monkeypatch.setattr(crosstalk_mcp, "RELAY_MAX_PARTICIPANTS", 3)
+    crosstalk_mcp._online_participants["capped"] = {}
+    for a in ["agent-1", "agent-2", "agent-3"]:
+        crosstalk_mcp._register_agent_presence("capped", a)
+    # a 4th distinct participant is denied
+    denied = crosstalk_mcp._join_denied("capped", "agent-4")
+    assert denied is not None and denied["error"] == "channel_full" and denied["limit"] == 3
+    # an already-present participant is never denied (heartbeat / re-join)
+    assert crosstalk_mcp._join_denied("capped", "agent-1") is None
+
+
+def test_participant_cap_unlimited_when_zero(db_isolation, monkeypatch):
+    monkeypatch.setattr(crosstalk_mcp, "RELAY_MAX_PARTICIPANTS", 0)
+    crosstalk_mcp._online_participants["free"] = {"a": {"last_seen": time.time()}, "b": {"last_seen": time.time()}}
+    assert crosstalk_mcp._join_denied("free", "z") is None
+
+
+def test_group_addressing_any_agent_and_side(db_isolation, monkeypatch):
+    """Directives resolve group tokens: any-agent, side:<role>, all — for N participants."""
+    monkeypatch.setattr(crosstalk_mcp, "RELAY_MAX_PARTICIPANTS", 0)
+    ch = "groups"
+    crosstalk_mcp._online_participants[ch] = {}
+    # a human asks all agents; another message targets a side/role; one is a broadcast
+    crosstalk_mcp._post(ch, "humanX", "DIRECTIVE", "all agents pause", recipient="any-agent")
+    crosstalk_mcp._post(ch, "humanX", "DIRECTIVE", "backend only", recipient="side:backend")
+    crosstalk_mcp._post(ch, "humanX", "DIRECTIVE", "everyone", recipient="all")
+    crosstalk_mcp._post(ch, "humanX", "INTERRUPT", "humanY only", recipient="humanY")
+
+    # agent-7 on the "backend" side: gets any-agent + side:backend + all, but not the humanY one
+    crosstalk_mcp._register_agent_presence(ch, "agent-7", side="backend")
+    got = {m["body"] for m in crosstalk_mcp._get_directives(ch, "agent-7")}
+    assert got == {"all agents pause", "backend only", "everyone"}
+
+    # agent-9 on the "frontend" side: any-agent + all, but NOT the backend-only one
+    crosstalk_mcp._register_agent_presence(ch, "agent-9", side="frontend")
+    got9 = {m["body"] for m in crosstalk_mcp._get_directives(ch, "agent-9")}
+    assert got9 == {"all agents pause", "everyone"}
+
+
+def test_session_done_quorum_three_speakers(db_isolation):
+    """With 3 speakers, the session auto-stops only when all three have posted DONE."""
+    ch = "trio"
+    crosstalk_mcp._start_session(ch)
+    crosstalk_mcp._post(ch, "agent-a", "DONE", "done")
+    crosstalk_mcp._post(ch, "agent-b", "NOTE", "still working")
+    crosstalk_mcp._post(ch, "agent-c", "DONE", "done")
+    assert crosstalk_mcp._get_session(ch) is not None       # agent-b hasn't finished
+    crosstalk_mcp._post(ch, "agent-b", "DONE", "done now")
+    assert crosstalk_mcp._get_session(ch) is None            # all three DONE -> stopped
+
+
+def test_session_min_done_override(db_isolation):
+    """min_done sets an explicit DONE quorum regardless of speaker count."""
+    ch = "quorum2"
+    crosstalk_mcp._start_session(ch, min_done=2)
+    crosstalk_mcp._post(ch, "agent-a", "NOTE", "hi")
+    crosstalk_mcp._post(ch, "agent-b", "DONE", "d")
+    assert crosstalk_mcp._get_session(ch) is not None        # only 1 DONE
+    crosstalk_mcp._post(ch, "agent-c", "DONE", "d")
+    assert crosstalk_mcp._get_session(ch) is None            # 2 DONE -> quorum met
