@@ -133,7 +133,7 @@
                     </div>
                     <div class="overflow-hidden leading-tight">
                         <div id="currentUserName" class="font-semibold text-sm text-white truncate">Human User</div>
-                        <div id="currentUserRole" class="text-xs text-discord-muted truncate">humanX (Side X)</div>
+                        <div id="currentUserRole" class="text-xs text-discord-muted truncate">humanX</div>
                     </div>
                 </div>
                 <button onclick="openIdentityModal()" class="text-discord-muted hover:text-white transition-colors p-1.5 rounded hover:bg-discord-hover" title="Edit Identity">
@@ -202,19 +202,18 @@
                         <div id="recipientSelector" class="flex items-center gap-1 bg-discord-darkest px-2 py-1 rounded">
                             <span class="text-discord-muted font-semibold">Recipient:</span>
                             <select id="msgRecipient" class="bg-transparent text-white outline-none cursor-pointer">
-                                <option value="" class="bg-discord-sidebar">any-human</option>
-                                <!-- Populated dynamically from presence -->
+                                <option value="any-human" class="bg-discord-sidebar">any-human</option>
+                                <option value="any-agent" class="bg-discord-sidebar">any-agent</option>
+                                <option value="all" class="bg-discord-sidebar">everyone</option>
+                                <!-- participants + roles populated dynamically from presence -->
                             </select>
                         </div>
 
-                        <!-- Side Selection -->
+                        <!-- Role tag on this message (defaults to your identity role) -->
                         <div class="flex items-center gap-1 bg-discord-darkest px-2 py-1 rounded">
-                            <span class="text-discord-muted font-semibold">Side:</span>
-                            <select id="msgSide" class="bg-transparent text-white outline-none cursor-pointer">
-                                <option value="" class="bg-discord-sidebar">none</option>
-                                <option value="X" class="bg-discord-sidebar">Side X</option>
-                                <option value="Y" class="bg-discord-sidebar">Side Y</option>
-                            </select>
+                            <span class="text-discord-muted font-semibold">Role:</span>
+                            <input id="msgSide" type="text" placeholder="none" spellcheck="false"
+                                class="bg-transparent text-white outline-none w-20 placeholder-discord-muted/50">
                         </div>
                     </div>
 
@@ -237,25 +236,10 @@
                 <span>Active Users</span>
             </div>
             <div id="presenceList" class="flex-1 overflow-y-auto p-3 space-y-4 text-sm">
-                <!-- Group Side X -->
                 <div>
-                    <h3 class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Side X (0)</h3>
-                    <div id="presenceSideX" class="space-y-0.5">
-                        <!-- Populated dynamically -->
-                    </div>
-                </div>
-                <!-- Group Side Y -->
-                <div>
-                    <h3 class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Side Y (0)</h3>
-                    <div id="presenceSideY" class="space-y-0.5">
-                        <!-- Populated dynamically -->
-                    </div>
-                </div>
-                <!-- Group Unassigned -->
-                <div>
-                    <h3 class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Unassigned (0)</h3>
-                    <div id="presenceUnassigned" class="space-y-0.5">
-                        <!-- Populated dynamically -->
+                    <h3 id="presenceHeader" class="text-xs font-bold text-discord-muted uppercase px-2 mb-1 tracking-wider">Online (0)</h3>
+                    <div id="presenceAll" class="space-y-0.5">
+                        <!-- Populated dynamically (N participants, any roles) -->
                     </div>
                 </div>
             </div>
@@ -283,12 +267,9 @@
                         class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
                 </div>
                 <div class="space-y-1.5">
-                    <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Side Allocation</label>
-                    <select id="modalSide" class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
-                        <option value="X">Side X (e.g. Creator / Ask Side)</option>
-                        <option value="Y">Side Y (e.g. Replier / Target Side)</option>
-                        <option value="">None (Spectator)</option>
-                    </select>
+                    <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Role / Team (optional)</label>
+                    <input type="text" id="modalSide" placeholder="e.g. backend, reviewer — leave blank for none"
+                        class="w-full bg-discord-darkest border border-discord-darkest focus:border-discord-accent outline-none rounded p-2.5 text-white text-sm transition-colors">
                 </div>
                 <div class="space-y-1.5">
                     <label class="text-xs font-bold text-discord-muted uppercase tracking-wider">Relay Token (Optional)</label>
@@ -362,7 +343,12 @@
                 if (response.status === 401) {
                     showAuthWarning(true, "Unauthorized! Please configure a valid Relay Token in settings (gear icon at bottom-left).");
                 } else if (response.status === 403) {
-                    showAuthWarning(true, "Your token is bound to a different participant. Set your Participant ID in settings to match the identity your token was issued for.");
+                    let msg = "Your token is bound to a different participant. Set your Participant ID in settings to match the identity your token was issued for.";
+                    try {
+                        const j = await response.clone().json();
+                        if (j && j.error === 'channel_full') msg = `This channel is full (participant limit ${j.limit}). Raise RELAY_MAX_PARTICIPANTS, or use Cloud for more.`;
+                    } catch (_) {}
+                    showAuthWarning(true, msg);
                 } else if (response.ok) {
                     showAuthWarning(false);
                 }
@@ -404,7 +390,7 @@
 
         function updateIdentityUI() {
             document.getElementById('currentUserName').innerText = identity.display_name;
-            document.getElementById('currentUserRole').innerText = `${identity.id} (${identity.side ? 'Side ' + identity.side : 'Spectator'})`;
+            document.getElementById('currentUserRole').innerText = `${identity.id}${identity.side ? ' · ' + identity.side : ''}`;
 
             // Set dynamic color for current user avatar based on ID
             const avatar = document.getElementById('currentUserAvatar');
@@ -577,10 +563,7 @@
                 msgs.forEach(msg => {
                     const isQuestion = msg.type && msg.type.toUpperCase() === 'QUESTION';
                     const isOpen = msg.status === 'open';
-                    const isToMe = msg.recipient === identity.id;
-                    const isToAnyHuman = msg.recipient === 'any-human' && identity.side;
-
-                    if (isQuestion && isOpen && (isToMe || isToAnyHuman)) {
+                    if (isQuestion && isOpen && recipientAddressesMe(msg.recipient)) {
                         unansweredQuestions.add(msg.id);
                     }
                 });
@@ -719,10 +702,8 @@
             }
 
             const isQuestion = msg.type && msg.type.toUpperCase() === 'QUESTION';
-            const isToMe = msg.recipient === identity.id;
-            const isToAnyHuman = msg.recipient === 'any-human' && identity.side;
 
-            if (isQuestion && (isToMe || isToAnyHuman)) {
+            if (isQuestion && recipientAddressesMe(msg.recipient)) {
                 const title = `Question from ${msg.sender} in #${msg.channel}`;
                 const body = msg.body;
 
@@ -957,22 +938,17 @@
         }
 
         function renderPresence() {
-            const sideXEl = document.getElementById('presenceSideX');
-            const sideYEl = document.getElementById('presenceSideY');
-            const unassignedEl = document.getElementById('presenceUnassigned');
-
-            const groupX = onlineParticipants.filter(p => p.side === 'X');
-            const groupY = onlineParticipants.filter(p => p.side === 'Y');
-            const groupNone = onlineParticipants.filter(p => p.side !== 'X' && p.side !== 'Y');
-
-            // Update Headers with count
-            sideXEl.previousElementSibling.innerText = `Side X (${groupX.length})`;
-            sideYEl.previousElementSibling.innerText = `Side Y (${groupY.length})`;
-            unassignedEl.previousElementSibling.innerText = `Unassigned (${groupNone.length})`;
+            const listEl = document.getElementById('presenceAll');
+            document.getElementById('presenceHeader').innerText = `Online (${onlineParticipants.length})`;
 
             const buildUserHtml = (p) => {
                 const avatarColor = getDeterministicColor(p.id);
-                const roleBadge = p.kind === 'agent' ? '<span class="bg-discord-accent text-[9px] font-bold text-white px-1 py-0.5 rounded leading-none uppercase">Agent</span>' : '';
+                const kindBadge = p.kind === 'agent'
+                    ? '<span class="bg-discord-accent text-[9px] font-bold text-white px-1 py-0.5 rounded leading-none uppercase">Agent</span>'
+                    : '';
+                const roleChip = p.side
+                    ? `<span class="text-[9px] font-semibold px-1 py-0.5 rounded leading-none" style="background-color:${getDeterministicColor(p.side)}33;color:${getDeterministicColor(p.side)}">${p.side}</span>`
+                    : '';
                 return `
                     <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-discord-hover cursor-pointer overflow-hidden transition-colors" onclick="selectRecipient('${p.id}')">
                         <div class="w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs text-white shadow" style="background-color: ${avatarColor}">
@@ -980,30 +956,46 @@
                         </div>
                         <div class="flex-1 overflow-hidden truncate flex items-center gap-1">
                             <span class="truncate font-semibold text-white/90 text-sm">${p.display_name}</span>
-                            ${roleBadge}
+                            ${kindBadge}${roleChip}
                         </div>
                     </div>
                 `;
             };
 
-            sideXEl.innerHTML = groupX.length > 0 ? groupX.map(buildUserHtml).join('') : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
-            sideYEl.innerHTML = groupY.length > 0 ? groupY.map(buildUserHtml).join('') : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
-            unassignedEl.innerHTML = groupNone.length > 0 ? groupNone.map(buildUserHtml).join('') : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
+            listEl.innerHTML = onlineParticipants.length > 0
+                ? onlineParticipants.map(buildUserHtml).join('')
+                : `<div class="text-xs text-discord-muted/50 px-2 italic">Nobody online</div>`;
 
-            // Dynamically populate Recipient select dropdown incomposer
+            // Recipient dropdown: group tokens + present roles + each present participant (except me)
             const recipientSelect = document.getElementById('msgRecipient');
             const currentSelected = recipientSelect.value;
-
-            // Build options
-            let optionsHtml = '<option value="" class="bg-discord-sidebar">any-human</option>';
+            let optionsHtml =
+                '<option value="any-human" class="bg-discord-sidebar">any-human</option>' +
+                '<option value="any-agent" class="bg-discord-sidebar">any-agent</option>' +
+                '<option value="all" class="bg-discord-sidebar">everyone</option>';
+            const roles = [...new Set(onlineParticipants.map(p => p.side).filter(Boolean))];
+            roles.forEach(r => {
+                const sel = ('side:' + r) === currentSelected ? 'selected' : '';
+                optionsHtml += `<option value="side:${r}" ${sel} class="bg-discord-sidebar">side: ${r}</option>`;
+            });
             onlineParticipants.forEach(p => {
-                // Don't include ourselves in the recipient select
                 if (p.id !== identity.id) {
-                    const isSelected = p.id === currentSelected ? 'selected' : '';
-                    optionsHtml += `<option value="${p.id}" ${isSelected} class="bg-discord-sidebar">${p.display_name} (${p.kind})</option>`;
+                    const sel = p.id === currentSelected ? 'selected' : '';
+                    optionsHtml += `<option value="${p.id}" ${sel} class="bg-discord-sidebar">${p.display_name} (${p.kind})</option>`;
                 }
             });
             recipientSelect.innerHTML = optionsHtml;
+        }
+
+        // Mirrors the server's group resolution: does `recipient` address me?
+        function recipientAddressesMe(recipient) {
+            if (!recipient) return false;
+            if (recipient === identity.id) return true;
+            if (recipient === 'all') return true;
+            if (recipient === 'any-human' && identity.kind !== 'agent') return true;
+            if (recipient === 'any-agent' && identity.kind === 'agent') return true;
+            if (identity.side && recipient === 'side:' + identity.side) return true;
+            return false;
         }
 
         function selectRecipient(id) {
@@ -1040,9 +1032,9 @@
         }
 
         function renderSingleMessage(msg) {
-            // Check if directed to me or any-human (when I am human)
+            // Directed straight at me (amber) vs addressed to a group I'm in (indigo)
             const isToMe = msg.recipient === identity.id;
-            const isToAnyHuman = msg.recipient === 'any-human' && identity.side;
+            const isToAnyHuman = !isToMe && recipientAddressesMe(msg.recipient);
             const isQuestion = msg.type && msg.type.toUpperCase() === 'QUESTION';
 
             // Background and border styling for directed notifications
@@ -1087,8 +1079,8 @@
 
             let sideBadge = '';
             if (msg.side) {
-                const sideColor = msg.side === 'X' ? 'border-emerald-500 text-emerald-400' : 'border-blue-500 text-blue-400';
-                sideBadge = `<span class="border ${sideColor} text-[9px] font-semibold px-1 rounded">Side ${msg.side}</span>`;
+                const c = getDeterministicColor(msg.side);
+                sideBadge = `<span class="text-[9px] font-semibold px-1 rounded" style="border:1px solid ${c};color:${c}">${msg.side}</span>`;
             }
 
             let recipientBadge = '';
